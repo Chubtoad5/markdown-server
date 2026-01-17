@@ -7,21 +7,24 @@ TCP_PORT="80" # change to 443 or higher if using TLS
 TLS_MODE="none" # Valid values none=disabled, internal=caddy self-signed, auto=letsencrypt
 TLS_FQDN="md.$(hostname -f)" # only used if TLS_MODE is not 'none'
 
+echo "### - Starting Markdown Server Installation - $(date) ###"
 
-echo "Cleaning up..."
+echo "  Cleaning up previous configuration..."
 docker compose -f "$BASE_DIR/docker-compose.yml" down > /dev/null 2>&1
 rm -rf "$BASE_DIR"
 mkdir -p "$SRV_DIR"
 
-echo "Generating Setup with Fixed Empty Link Issue..."
+echo "  Generating new CaddyFile..."
 
 # 1. Caddyfile
 if [[ "$TLS_MODE" == "none" ]]; then
-    cat <<EOF > "$BASE_DIR/Caddyfile"
+  echo "  Configuring with basic HTTP on port: $TCP_PORT"
+  cat <<EOF > "$BASE_DIR/Caddyfile"
 http://$MGMT_IP:$TCP_PORT {
 EOF
 else
-    cat <<EOF > "$BASE_DIR/Caddyfile"
+  echo "  Configuring with HTTPS on port: $TCP_PORT"
+  cat <<EOF > "$BASE_DIR/Caddyfile"
 {
   default_sni $MGMT_IP
 }
@@ -29,7 +32,7 @@ https://$TLS_FQDN:$TCP_PORT https://$MGMT_IP:$TCP_PORT {
 EOF
 fi
 if [[ "$TLS_MODE" == "internal" ]]; then
-    cat <<'EOF' >> "$BASE_DIR/Caddyfile"
+  cat <<'EOF' >> "$BASE_DIR/Caddyfile"
     tls internal
 EOF
 fi
@@ -47,6 +50,7 @@ cat <<'EOF' >> "$BASE_DIR/Caddyfile"
 EOF
 
 # 2. Layout HTML
+echo "  Generating layout.html..."
 cat <<'EOF' > "$SRV_DIR/layout.html"
 <!DOCTYPE html>
 <html lang="en">
@@ -171,6 +175,7 @@ cat <<'EOF' > "$SRV_DIR/layout.html"
 EOF
 
 # 3. Create Demo Content
+echo "  Generating example Markdown files..."
 cat <<EOF > "$SRV_DIR/index.md"
 # Home Page
 This is the index.md file, which will always be at the top of the navigation sidebar.  
@@ -210,6 +215,7 @@ You can also use longer file names to test text overflow handling in the sidebar
 EOF
 
 # 4. Docker Compose
+echo "  Generating docker-compose.yml..."
 cat <<EOF > "$BASE_DIR/docker-compose.yml"
 services:
   caddy:
