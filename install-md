@@ -1,0 +1,205 @@
+#!/bin/bash
+
+BASE_DIR="/opt/caddy-markdown"
+SRV_DIR="$BASE_DIR/srv"
+
+echo "Cleaning up..."
+docker compose -f "$BASE_DIR/docker-compose.yml" down > /dev/null 2>&1
+rm -rf "$BASE_DIR"
+mkdir -p "$SRV_DIR"
+
+echo "Generating Setup with Fixed Empty Link Issue..."
+
+# 1. Caddyfile
+cat <<'EOF' > "$BASE_DIR/Caddyfile"
+:80 {
+    root * /srv
+    templates
+    file_server
+
+    @markdown_site {
+        path /
+        path *.md
+    }
+    rewrite @markdown_site /layout.html
+}
+EOF
+
+# 2. Layout HTML
+cat <<'EOF' > "$SRV_DIR/layout.html"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Docs - Dark Mode</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown-dark.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css">
+    <style>
+        :root {
+            --sidebar-bg: #0d1117;
+            --content-bg: #161b22;
+            --code-bg: #0d1117;
+            --text-main: #c9d1d9;
+            --accent: #58a6ff;
+            --sidebar-border: #30363d;
+            --link-color: #8b949e;
+        }
+
+        body { 
+            display: flex; margin: 0; height: 100vh; overflow: hidden; 
+            font-family: -apple-system, system-ui, sans-serif; 
+            background-color: var(--content-bg); color: var(--text-main); 
+        }
+
+        nav { 
+            width: 195px; background-color: var(--sidebar-bg); 
+            border-right: 1px solid var(--sidebar-border); 
+            padding: 25px 15px; overflow-y: auto; flex-shrink: 0; 
+        }
+
+        nav h3 { font-size: 10px; color: #8b949e; text-transform: uppercase; margin-bottom: 15px; letter-spacing: 1px; }
+        nav ul { list-style: none; padding: 0; margin: 0; }
+        nav li { margin-bottom: 4px; }
+
+        nav a { 
+            display: block; padding: 10px 12px; font-size: 13px; 
+            color: var(--link-color) !important; text-decoration: none !important; 
+            border-radius: 6px; white-space: nowrap; overflow: hidden; 
+            text-overflow: ellipsis; min-height: 1.2em; /* Prevents collapse if text is missing */
+        }
+        
+        nav a:hover { background-color: #21262d; color: var(--accent) !important; }
+        nav a.active { background-color: #1f6feb; color: #ffffff !important; font-weight: 600; }
+
+        main { flex-grow: 1; overflow-y: auto; background-color: var(--content-bg); }
+        .markdown-body { box-sizing: border-box; width: 100%; max-width: 100%; padding: 50px; background-color: transparent !important; }
+
+        .markdown-body pre { position: relative; background-color: var(--code-bg) !important; border: 1px solid #30363d !important; border-radius: 8px; padding: 16px; }
+
+        .copy-code-button { position: absolute; top: 10px; right: 10px; padding: 4px 8px; background-color: #21262d; color: #8b949e; border: 1px solid #30363d; border-radius: 6px; font-size: 11px; cursor: pointer; opacity: 0; transition: opacity 0.2s; z-index: 10; }
+        pre:hover .copy-code-button { opacity: 1; }
+
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--sidebar-bg); }
+        ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+    </style>
+</head>
+<body>
+
+<nav>
+    <h3>Navigation</h3>
+    <ul>
+        <li>
+            <a href="/" class="{{if or (eq $.OriginalReq.URL.Path "/") (eq $.OriginalReq.URL.Path "")}}active{{end}}">Home</a>
+        </li>
+
+        {{/* Robust Loop */}}
+        {{range listFiles "/"}}
+            {{if and (hasSuffix ".md" .) (ne . "index.md") (ne . "layout.html")}}
+                <li>
+                    <a href="/{{.}}" class="{{if eq $.OriginalReq.URL.Path (printf "/%s" .)}}active{{end}}">
+                        {{/* Use simple logic to ensure text is never blank */}}
+                        {{ $label := . | trimSuffix ".md" | replace "-" " " | title }}
+                        {{ if $label }}{{ $label }}{{ else }}{{ . }}{{ end }}
+                    </a>
+                </li>
+            {{end}}
+        {{end}}
+    </ul>
+</nav>
+
+<main>
+    <article class="markdown-body">
+        {{$req := .OriginalReq.URL.Path}}
+        {{if or (eq $req "/") (eq $req "")}}
+            {{markdown (include "index.md")}}
+        {{else}}
+            {{markdown (include $req)}}
+        {{end}}
+    </article>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        hljs.highlightAll();
+        document.querySelectorAll('pre').forEach((codeBlock) => {
+            const button = document.createElement('button');
+            button.className = 'copy-code-button';
+            button.innerText = 'Copy';
+            button.addEventListener('click', () => {
+                const text = codeBlock.querySelector('code').innerText;
+                const textArea = document.createElement("textarea");
+                textArea.value = text;
+                document.body.appendChild(textArea);
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    button.innerText = 'Copied!';
+                } catch (err) { button.innerText = 'Error'; }
+                document.body.removeChild(textArea);
+                setTimeout(() => { button.innerText = 'Copy'; }, 2000);
+            });
+            codeBlock.appendChild(button);
+        });
+    });
+</script>
+</body>
+</html>
+EOF
+
+# 3. Create Demo Content
+cat <<EOF > "$SRV_DIR/index.md"
+# Home Page
+This is the index.md file, which will always be at the top of the navigation sidebar.
+
+## Table For Reference
+| Topic | Link | Note |
+|:---------|:---------|:---------|
+| First Topic   | [link](1-first-topic.md)   | Introduction to the docs   |
+| Copy Test   | [link](Copy-test.md)   | Discover the copy feature   |
+| Next Topic   | [link](next-topic-with-a-long-name.md)   | Testing long file names   |
+
+EOF
+
+cat <<EOF > "$SRV_DIR/1-first-topic.md"
+# First Topic
+Markdown files are sorted aphabetically in the sidebar. You can prefix file names with numbers to control the order.  
+Here is a sample link:
+[To the next topic](Copy-test.md)
+[Back to Home](/) 
+EOF
+
+cat <<EOF > "$SRV_DIR/Copy-test.md"
+# Copy Test
+Supports github style code blocks with built in copy button. Test out the copy feature from the below code block:
+```
+echo "Hello World!"
+```
+[Back to Home](/) 
+EOF
+cat <<EOF > "$SRV_DIR/next-topic-with-a-long-name.md"
+# Next Topic
+This file is called `next-topic-with-a-long-name.md` to show that dashes are replaced with spaces in the sidebar links.  
+Headings are also title cased automatically.  
+You can also use longer file names to test text overflow handling in the sidebar links.
+[Back to Home](/) 
+EOF
+
+# 4. Docker Compose
+cat <<EOF > "$BASE_DIR/docker-compose.yml"
+services:
+  caddy:
+    image: caddy:latest
+    ports:
+      - "8080:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile
+      - ./srv:/srv
+    restart: unless-stopped
+EOF
+
+echo "Starting..."
+cd "$BASE_DIR" && docker compose up -d
+echo "Done! Visit http://$(hostname -I | awk '{print $1}'):8080"
