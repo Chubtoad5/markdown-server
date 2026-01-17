@@ -152,38 +152,39 @@ EOF
 # 3. Create Demo Content
 cat <<EOF > "$SRV_DIR/index.md"
 # Home Page
-This is the index.md file, which will always be at the top of the navigation sidebar.
+This is the index.md file, which will always be at the top of the navigation sidebar.  
 
 ## Table For Reference
 | Topic | Link | Note |
 |:---------|:---------|:---------|
 | First Topic   | [link](1-first-topic.md)   | Introduction to the docs   |
 | Copy Test   | [link](Copy-test.md)   | Discover the copy feature   |
-| Next Topic   | [link](next-topic-with-a-long-name.md)   | Testing long file names   |
+| Next Topic   | [link](next-topic-with-a-long-name.md)   | Testing long file names   |  
 
 EOF
 
 cat <<EOF > "$SRV_DIR/1-first-topic.md"
 # First Topic
-Markdown files are sorted aphabetically in the sidebar. You can prefix file names with numbers to control the order.  
-Here is a sample link:
-[To the next topic](Copy-test.md)
+Markdown files are sorted alphabetically in the sidebar. You can prefix file names with numbers to control the order.  
+Here is a sample link:  
+[To the next topic](Copy-test.md)  
 [Back to Home](/) 
 EOF
 
 cat <<EOF > "$SRV_DIR/Copy-test.md"
 # Copy Test
-Supports github style code blocks with built in copy button. Test out the copy feature from the below code block:
-```
+Supports github style code blocks with built in copy button. Test out the copy feature from the below code block:  
+\`\`\`
 echo "Hello World!"
-```
+\`\`\`
 [Back to Home](/) 
 EOF
+
 cat <<EOF > "$SRV_DIR/next-topic-with-a-long-name.md"
 # Next Topic
-This file is called `next-topic-with-a-long-name.md` to show that dashes are replaced with spaces in the sidebar links.  
+This file is called \`next-topic-with-a-long-name.md\` to show that dashes are replaced with spaces in the sidebar links.  
 Headings are also title cased automatically.  
-You can also use longer file names to test text overflow handling in the sidebar links.
+You can also use longer file names to test text overflow handling in the sidebar links.  
 [Back to Home](/) 
 EOF
 
@@ -193,7 +194,7 @@ services:
   caddy:
     image: caddy:latest
     ports:
-      - "8080:80"
+      - "80:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - ./srv:/srv
