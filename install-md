@@ -6,6 +6,7 @@ MGMT_IP="$(hostname -I | awk '{print $1}')" # Bind IP Address
 FQDN="md.$(hostname -f)" # only used if TLS_MODE is not 'none', make sure this value is resolvable with DNS
 TCP_PORT="80" # change to 443 or higher if using TLS
 TLS_MODE="none" # Valid values none=disabled, internal=caddy self-signed, auto=letsencrypt
+BROWSER_TITLE="Markdown Server"
 
 
 echo "### - Starting Markdown Server Installation - $(date) ###"
@@ -52,13 +53,13 @@ EOF
 
 # 2. Layout HTML
 echo "  Generating layout.html..."
-cat <<'EOF' > "$SRV_DIR/layout.html"
+cat <<EOF > "$SRV_DIR/layout.html"
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Docs - Dark Mode</title>
+    <title>$BROWSER_TITLE</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown-dark.min.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css">
     <style>
@@ -126,8 +127,8 @@ cat <<'EOF' > "$SRV_DIR/layout.html"
                 <li>
                     <a href="/{{.}}" class="{{if eq $.OriginalReq.URL.Path (printf "/%s" .)}}active{{end}}">
                         {{/* Use simple logic to ensure text is never blank */}}
-                        {{ $label := . | trimSuffix ".md" | replace "-" " " | title }}
-                        {{ if $label }}{{ $label }}{{ else }}{{ . }}{{ end }}
+                        {{ \$label := . | trimSuffix ".md" | replace "-" " " | title }}
+                        {{ if \$label }}{{ \$label }}{{ else }}{{ . }}{{ end }}
                     </a>
                 </li>
             {{end}}
@@ -137,11 +138,11 @@ cat <<'EOF' > "$SRV_DIR/layout.html"
 
 <main>
     <article class="markdown-body">
-        {{$req := .OriginalReq.URL.Path}}
-        {{if or (eq $req "/") (eq $req "")}}
+        {{\$req := .OriginalReq.URL.Path}}
+        {{if or (eq \$req "/") (eq \$req "")}}
             {{markdown (include "index.md")}}
         {{else}}
-            {{markdown (include $req)}}
+            {{markdown (include \$req)}}
         {{end}}
     </article>
 </main>
