@@ -237,7 +237,9 @@ echo
 echo "Setup complete!"
 echo "  Navigate to:"
 if [[ "$TLS_MODE" != "none" ]]; then
+    echo "    https://$MGMT_IP:$TCP_PORT"
     echo "    https://$TLS_FQDN:$TCP_PORT"
 else
     echo "    http://$MGMT_IP:$TCP_PORT"
+    echo "    http://$FQDN:$TCP_PORT"
 fi
