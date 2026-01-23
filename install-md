@@ -127,26 +127,39 @@ cat <<EOF > "$SRV_DIR/layout.html"
 <body>
 
 <nav>
-    <h3>Navigation</h3>
-    <ul>
-        <li>
-            <a href="/" class="{{if or (eq $.OriginalReq.URL.Path "/") (eq $.OriginalReq.URL.Path "")}}active{{end}}">Home</a>
-        </li>
+  <h3>Navigation</h3>
+  <ul>
+    <li>
+      <a href="/"
+         class="{{ if or (eq .OriginalReq.URL.Path "/") (eq .OriginalReq.URL.Path "") }}active{{ end }}">
+        Home
+      </a>
+    </li>
 
-        {{/* Robust Loop */}}
-        {{range listFiles "/"}}
-            {{if and (hasSuffix ".md" .) (ne . "index.md") (ne . "layout.html")}}
-                <li>
-                    <a href="/{{.}}" class="{{if eq $.OriginalReq.URL.Path (printf "/%s" .)}}active{{end}}">
-                        {{/* Use simple logic to ensure text is never blank */}}
-                        {{ \$label := . | trimSuffix ".md" | replace "-" " " | title }}
-                        {{ if \$label }}{{ \$label }}{{ else }}{{ . }}{{ end }}
-                    </a>
-                </li>
-            {{end}}
-        {{end}}
-    </ul>
+    {{/* 1) Collect markdown files */}}
+    {{ \$files := list }}
+    {{ range listFiles "/" }}
+      {{ if and (hasSuffix ".md" .) (ne . "index.md") (ne . "layout.html") }}
+        {{ \$files = append \$files . }}
+      {{ end }}
+    {{ end }}
+
+    {{/* 2) Sort lexicographically */}}
+    {{ \$sorted := sortAlpha \$files }}
+
+    {{/* 3) Render sorted list */}}
+    {{ range \$sorted }}
+      <li>
+        <a href="/{{ . }}"
+           class="{{ if eq $.OriginalReq.URL.Path (printf "/%s" .) }}active{{ end }}">
+          {{ . | trimSuffix ".md" | replace "-" " " }}
+        </a>
+      </li>
+    {{ end }}
+
+  </ul>
 </nav>
+
 
 <main>
     <article class="markdown-body">
@@ -203,7 +216,7 @@ This is the index.md file, which will always be at the top of the navigation sid
 
 EOF
 
-cat <<EOF > "$SRV_DIR/1-first-topic.md"
+cat <<EOF > "$SRV_DIR/01-first-topic.md"
 # First Topic
 Markdown files are sorted alphabetically in the sidebar. You can prefix file names with numbers to control the order.  
 Here is a sample link:  
