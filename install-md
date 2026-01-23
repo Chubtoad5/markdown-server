@@ -205,12 +205,21 @@ EOF
 echo "  Generating example Markdown files..."
 cat <<EOF > "$SRV_DIR/index.md"
 # Home Page
-This is the index.md file, which will always be at the top of the navigation sidebar.  
+This is the index.md file, which will always be at the top of the navigation sidebar. 
+
+## How to add Markdown pages to this site
+- Generate a markdown (.md) file
+- Files will be sorted alpha numericly based on file namne on the navigation page
+- Use number prefixes to sort, i.e. "01-first-file.md, 02-second-file.md, etc..."
+- Use valid markdown formatting
+- Login to this host
+- Create a new or copy your .md file into `/opt/caddy-markdown/srv` directory
+- Save the file, then refresh the page
 
 ## Table For Reference
 | Topic | Link | Note |
 |:---------|:---------|:---------|
-| First Topic   | [link](1-first-topic.md)   | Introduction to the docs   |
+| First Topic   | [link](01-first-topic.md)   | Introduction to the docs   |
 | Copy Test   | [link](Copy-test.md)   | Discover the copy feature   |
 | Next Topic   | [link](next-topic-with-a-long-name.md)   | Testing long file names   |  
 

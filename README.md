@@ -32,6 +32,7 @@ chmod +x install-md
 |TCP_PORT|TCP port for the web server, change to 443 or higher if using TLS|"80"|
 |TLS_MODE|TLS mode, valid values are none=disabled, internal=caddy self-signed, auto=letsencrypt|"none"|
 |TLS_FQDN|Only used with TLS, an FQDN for the webserver, must be resolvable|"md.$(hostname -f)"|
+|BROWSER_TITLE|Adds a title header to your browser tab|"Markdown Server"|
 
 3. Run the `install-md` script **note** may require root depending on install directory permissions
 
