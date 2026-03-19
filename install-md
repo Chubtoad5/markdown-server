@@ -228,9 +228,9 @@ cat <<EOF > "$SRV_DIR/layout.html"
     <article class="markdown-body">
         {{\$req := .OriginalReq.URL.Path}}
         {{if or (eq \$req "/") (eq \$req "")}}
-            {{markdown (include "index.md")}}
+            {{markdown (readFile "index.md")}}
         {{else}}
-            {{markdown (include \$req)}}
+            {{markdown (readFile \$req)}}
         {{end}}
     </article>
 </main>
