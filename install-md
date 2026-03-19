@@ -83,6 +83,7 @@ cat <<EOF > "$SRV_DIR/layout.html"
             --accent: #58a6ff;
             --sidebar-border: #30363d;
             --link-color: #8b949e;
+            --sidebar-width: 195px;
         }
 
         body { 
@@ -92,7 +93,8 @@ cat <<EOF > "$SRV_DIR/layout.html"
         }
 
         nav { 
-            width: 195px; background-color: var(--sidebar-bg); 
+            width: var(--sidebar-width); min-width: 120px; max-width: 50vw;
+            box-sizing: border-box; background-color: var(--sidebar-bg); 
             border-right: 1px solid var(--sidebar-border); 
             padding: 25px 15px; overflow-y: auto; flex-shrink: 0; 
         }
@@ -105,11 +107,34 @@ cat <<EOF > "$SRV_DIR/layout.html"
             display: block; padding: 10px 12px; font-size: 13px; 
             color: var(--link-color) !important; text-decoration: none !important; 
             border-radius: 6px; white-space: nowrap; overflow: hidden; 
-            text-overflow: ellipsis; min-height: 1.2em; /* Prevents collapse if text is missing */
+            text-overflow: ellipsis; min-height: 1.2em;
         }
         
         nav a:hover { background-color: #21262d; color: var(--accent) !important; }
         nav a.active { background-color: #1f6feb; color: #ffffff !important; font-weight: 600; }
+
+        /* Folder styles */
+        .folder-toggle {
+            display: flex; align-items: center; padding: 10px 12px; font-size: 13px;
+            color: var(--link-color); cursor: pointer; border-radius: 6px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+            user-select: none; font-weight: 600;
+        }
+        .folder-toggle:hover { background-color: #21262d; color: var(--accent); }
+        .folder-toggle::before {
+            content: '\25B6'; display: inline-block; margin-right: 8px; font-size: 9px;
+            transition: transform 0.2s ease; flex-shrink: 0;
+        }
+        .folder.expanded > .folder-toggle::before { transform: rotate(90deg); }
+        .folder-contents { display: none; padding-left: 12px; }
+        .folder.expanded > .folder-contents { display: block; }
+
+        /* Resize handle */
+        .resize-handle {
+            width: 5px; cursor: col-resize; background-color: transparent;
+            flex-shrink: 0; transition: background-color 0.15s;
+        }
+        .resize-handle:hover, .resize-handle.active { background-color: var(--accent); }
 
         main { flex-grow: 1; overflow-y: auto; background-color: var(--content-bg); }
         .markdown-body { box-sizing: border-box; width: 100%; max-width: 100%; padding: 50px; background-color: transparent !important; }
@@ -126,7 +151,7 @@ cat <<EOF > "$SRV_DIR/layout.html"
 </head>
 <body>
 
-<nav>
+<nav id="sidebar">
   <h3>Navigation</h3>
   <ul>
     <li>
@@ -136,19 +161,16 @@ cat <<EOF > "$SRV_DIR/layout.html"
       </a>
     </li>
 
-    {{/* 1) Collect markdown files */}}
-    {{ \$files := list }}
+    {{/* 1) Collect root-level markdown files */}}
+    {{ \$rootFiles := list }}
     {{ range listFiles "/" }}
       {{ if and (hasSuffix ".md" .) (ne . "index.md") (ne . "layout.html") }}
-        {{ \$files = append \$files . }}
+        {{ \$rootFiles = append \$rootFiles . }}
       {{ end }}
     {{ end }}
 
-    {{/* 2) Sort lexicographically */}}
-    {{ \$sorted := sortAlpha \$files }}
-
-    {{/* 3) Render sorted list */}}
-    {{ range \$sorted }}
+    {{/* 2) Render sorted root-level files */}}
+    {{ range sortAlpha \$rootFiles }}
       <li>
         <a href="/{{ . }}"
            class="{{ if eq $.OriginalReq.URL.Path (printf "/%s" .) }}active{{ end }}">
@@ -157,17 +179,58 @@ cat <<EOF > "$SRV_DIR/layout.html"
       </li>
     {{ end }}
 
+    {{/* 3) Collect subdirectories (non .md, non .html, non hidden entries) */}}
+    {{ \$dirs := list }}
+    {{ range listFiles "/" }}
+      {{ if and (not (hasSuffix ".md" .)) (not (hasSuffix ".html" .)) (not (hasPrefix "." .)) }}
+        {{ \$dirs = append \$dirs . }}
+      {{ end }}
+    {{ end }}
+
+    {{/* 4) Render sorted directories with their markdown files */}}
+    {{ range sortAlpha \$dirs }}
+      {{ \$dirName := . }}
+      {{ \$dirFiles := list }}
+      {{ range listFiles (printf "/%s" \$dirName) }}
+        {{ if hasSuffix ".md" . }}
+          {{ \$dirFiles = append \$dirFiles . }}
+        {{ end }}
+      {{ end }}
+      {{ if \$dirFiles }}
+        {{ \$hasActive := false }}
+        {{ range sortAlpha \$dirFiles }}
+          {{ if eq $.OriginalReq.URL.Path (printf "/%s/%s" \$dirName .) }}
+            {{ \$hasActive = true }}
+          {{ end }}
+        {{ end }}
+        <li class="folder{{ if \$hasActive }} expanded{{ end }}">
+          <div class="folder-toggle">{{ \$dirName | replace "-" " " }}</div>
+          <ul class="folder-contents">
+            {{ range sortAlpha \$dirFiles }}
+              <li>
+                <a href="/{{ \$dirName }}/{{ . }}"
+                   class="{{ if eq $.OriginalReq.URL.Path (printf "/%s/%s" \$dirName .) }}active{{ end }}">
+                  {{ . | trimSuffix ".md" | replace "-" " " }}
+                </a>
+              </li>
+            {{ end }}
+          </ul>
+        </li>
+      {{ end }}
+    {{ end }}
+
   </ul>
 </nav>
 
+<div class="resize-handle" id="resizeHandle"></div>
 
 <main>
     <article class="markdown-body">
         {{\$req := .OriginalReq.URL.Path}}
         {{if or (eq \$req "/") (eq \$req "")}}
-            {{markdown (include "index.md")}}
+            {{markdown (readFile "index.md")}}
         {{else}}
-            {{markdown (include \$req)}}
+            {{markdown (readFile \$req)}}
         {{end}}
     </article>
 </main>
@@ -176,6 +239,8 @@ cat <<EOF > "$SRV_DIR/layout.html"
 <script>
     document.addEventListener('DOMContentLoaded', () => {
         hljs.highlightAll();
+
+        // Copy code button
         document.querySelectorAll('pre').forEach((codeBlock) => {
             const button = document.createElement('button');
             button.className = 'copy-code-button';
@@ -195,6 +260,53 @@ cat <<EOF > "$SRV_DIR/layout.html"
             });
             codeBlock.appendChild(button);
         });
+
+        // Folder expand/collapse toggle
+        document.querySelectorAll('.folder-toggle').forEach((toggle) => {
+            toggle.addEventListener('click', () => {
+                toggle.parentElement.classList.toggle('expanded');
+            });
+        });
+
+        // Sidebar resize with mouse drag
+        const sidebar = document.getElementById('sidebar');
+        const handle = document.getElementById('resizeHandle');
+        let isResizing = false;
+
+        // Restore saved sidebar width
+        const savedWidth = localStorage.getItem('mdSidebarWidth');
+        if (savedWidth) {
+            const w = parseInt(savedWidth, 10);
+            if (w >= 120 && w <= window.innerWidth * 0.5) {
+                sidebar.style.width = w + 'px';
+            }
+        }
+
+        handle.addEventListener('mousedown', (e) => {
+            isResizing = true;
+            handle.classList.add('active');
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isResizing) return;
+            const newWidth = e.clientX;
+            if (newWidth >= 120 && newWidth <= window.innerWidth * 0.5) {
+                sidebar.style.width = newWidth + 'px';
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (isResizing) {
+                isResizing = false;
+                handle.classList.remove('active');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                localStorage.setItem('mdSidebarWidth', sidebar.offsetWidth);
+            }
+        });
     });
 </script>
 </body>
@@ -213,8 +325,16 @@ This is the index.md file, which will always be at the top of the navigation sid
 - Use number prefixes to sort, i.e. "01-first-file.md, 02-second-file.md, etc..."
 - Use valid markdown formatting
 - Login to this host
-- Create a new or copy your .md file into `/opt/caddy-markdown/srv` directory
+- Create a new or copy your .md file into \`/opt/caddy-markdown/srv\` directory
 - Save the file, then refresh the page
+
+## Folder Hierarchy
+You can organize markdown files into subdirectories for better structure:
+- Create a subdirectory inside \`/opt/caddy-markdown/srv\` (e.g. \`tutorials/\`)
+- Place \`.md\` files inside the subdirectory
+- Folders appear in the sidebar and can be expanded or collapsed by clicking on them
+- The sidebar is resizable by dragging its right edge
+- Root-level \`.md\` files continue to appear as a flat list above any folders
 
 ## Table For Reference
 | Topic | Link | Note |
@@ -222,6 +342,7 @@ This is the index.md file, which will always be at the top of the navigation sid
 | First Topic   | [link](01-first-topic.md)   | Introduction to the docs   |
 | Copy Test   | [link](Copy-test.md)   | Discover the copy feature   |
 | Next Topic   | [link](next-topic-with-a-long-name.md)   | Testing long file names   |  
+| Tutorial: Getting Started   | [link](tutorials/getting-started.md)   | A page inside a folder   |
 
 EOF
 
@@ -248,6 +369,35 @@ This file is called \`next-topic-with-a-long-name.md\` to show that dashes are r
 Headings are also title cased automatically.  
 You can also use longer file names to test text overflow handling in the sidebar links.  
 [Back to Home](/) 
+EOF
+
+# 3b. Create demo subdirectory with sample files
+echo "  Generating example subdirectory (tutorials)..."
+mkdir -p "$SRV_DIR/tutorials"
+
+cat <<EOF > "$SRV_DIR/tutorials/getting-started.md"
+# Getting Started
+This page lives inside the \`tutorials/\` subdirectory.
+
+Folders appear in the sidebar as collapsible sections. Click the folder name to expand or collapse it.
+
+## Next Steps
+- Try creating your own subdirectory under \`/opt/caddy-markdown/srv\`
+- Add \`.md\` files to it and refresh the page
+
+[Back to Home](/)
+EOF
+
+cat <<EOF > "$SRV_DIR/tutorials/advanced-config.md"
+# Advanced Configuration
+This is another page inside the \`tutorials/\` folder, demonstrating that multiple files within a subdirectory are listed alphabetically.
+
+## Tips
+- Prefix file names with numbers to control sort order (e.g. \`01-setup.md\`, \`02-usage.md\`)
+- Dashes in file names are displayed as spaces in the sidebar
+- The sidebar can be resized by dragging its right edge
+
+[Back to Home](/)
 EOF
 
 # 4. Docker Compose
