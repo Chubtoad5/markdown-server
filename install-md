@@ -1,79 +1,369 @@
 #!/bin/bash
+#
+# install-md — Markdown Server installer (Chubtoad5)
+#
+# A Caddy-in-Docker static Markdown site with a folder-hierarchy sidebar.
+# Conforms to the Chubtoad5 tooling conventions: runtime env-var overrides,
+# distro detection, root requirement, JIT dependency fetch, tri-mode
+# online/save/offline, and a per-run log.
+#
+# Modes: online install (default), `save` (build an air-gap bundle), and
+# offline install (auto-detected when md-save.tar.gz is present). The agent
+# API and upload UI arrive in later phases; the custom image already bundles
+# the caddy-webdav module so those phases only add Caddyfile routes.
 
-BASE_DIR="/opt/caddy-markdown"
-SRV_DIR="$BASE_DIR/srv"
-MGMT_IP="$(hostname -I | awk '{print $1}')" # Bind IP Address
-FQDN="md.$(hostname -f)" # only used if TLS_MODE is not 'none', make sure this value is resolvable with DNS
-TCP_PORT="80" # change to 443 or higher if using TLS
-TLS_MODE="none" # Valid values none=disabled, internal=caddy self-signed, auto=letsencrypt
-BROWSER_TITLE="Markdown Server"
+set -euo pipefail
 
-if [[ "$EUID" -ne 0 ]]; then
-    echo "This script must be run as root."
-    exit 1
-fi
+SCRIPT_VERSION="1.1.0"
+IPP_URL="https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh"
 
-if [[ $1 == "uninstall" ]]; then
-    echo "### - Uninstalling Markdown Server - $(date) ###"
-    docker compose -f "$BASE_DIR/docker-compose.yml" down > /dev/null 2>&1
-    rm -rf "$BASE_DIR"
-    echo "### - Markdown Server Uninstalled - $(date) ###"
-    exit 0
-fi
+### ---- USER DEFINED VARIABLES (all runtime-overridable: sudo VAR=value ./install-md) ----
+BASE_DIR="${BASE_DIR:-/opt/caddy-markdown}"           # Install and data directory
+SRV_DIR="${SRV_DIR:-$BASE_DIR/srv}"                   # Markdown content directory
+MGMT_IP="${MGMT_IP:-$(hostname -I | awk '{print $1}')}"  # Bind IP address
+FQDN="${TLS_FQDN:-${FQDN:-md.$(hostname -f 2>/dev/null || hostname)}}"  # FQDN (TLS_FQDN alias accepted)
+TCP_PORT="${TCP_PORT:-80}"                            # Listen port (use 443+ with TLS)
+TLS_MODE="${TLS_MODE:-none}"                          # none | internal (self-signed) | auto (letsencrypt)
+BROWSER_TITLE="${BROWSER_TITLE:-Markdown Server}"     # Browser tab title
+CADDY_VERSION="${CADDY_VERSION:-latest}"              # Caddy base image tag (latest -> caddy:builder)
+IMG_NAME="${IMG_NAME:-markdown-caddy}"                # Built (xcaddy+webdav) image repo name
+MAX_FOLDER_DEPTH="${MAX_FOLDER_DEPTH:-5}"             # Sidebar/API folder nesting depth (guardrail)
+AUTH_MODE="${AUTH_MODE:-basic}"                       # basic | none | forward — guards /admin + /dav writes
+MD_ADMIN_USER="${MD_ADMIN_USER:-admin}"               # basic-auth username
+MD_ADMIN_PASSWORD="${MD_ADMIN_PASSWORD:-changeme}"    # basic-auth password (CHANGE for production!)
+ENABLE_WEBDAV="${ENABLE_WEBDAV:-true}"                # enable WebDAV (/dav) + upload UI (/admin)
+FORWARD_AUTH_URL="${FORWARD_AUTH_URL:-}"              # AUTH_MODE=forward: IdP/Authentik outpost URL
+ADMIN_HASH=""                                         # bcrypt hash of MD_ADMIN_PASSWORD (computed at install)
 
-echo "### - Starting Markdown Server Installation - $(date) ###"
+# Air-gap / asset settings
+OFFLINE_SENTINEL="md-save.tar.gz"                     # Presence in cwd triggers offline mode
+WEBDAV_MODULE="github.com/mholt/caddy-webdav"         # Caddy module baked into the custom image
+ASSET_CSS_MD="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown-dark.min.css"
+ASSET_CSS_HL="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css"
+ASSET_JS_HL="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"
 
-echo "  Cleaning up previous configuration..."
-docker compose -f "$BASE_DIR/docker-compose.yml" down > /dev/null 2>&1
-rm -rf "$BASE_DIR"
-mkdir -p "$SRV_DIR"
+LOG_FILE="$(pwd)/md-install.log"
 
-echo "  Generating new CaddyFile..."
+_err() { echo "ERROR: install-md failed at line $1 (exit $2). See ${LOG_FILE} for details." >&2; }
+trap '_err "$LINENO" "$?"' ERR
 
-# 1. Caddyfile
-if [[ "$TLS_MODE" == "none" ]]; then
-  echo "  Configuring with basic HTTP on port: $TCP_PORT"
-  cat <<EOF > "$BASE_DIR/Caddyfile"
-http://$FQDN:$TCP_PORT http://$MGMT_IP:$TCP_PORT {
+usage() {
+    cat <<EOF
+install-md — Markdown Server installer (Chubtoad5) v$SCRIPT_VERSION
+
+Usage: sudo [VAR=value ...] ./install-md [command]
+
+Commands:
+  install     Install or refresh the Markdown Server (default if omitted).
+              Offline install is automatic when ./md-save.tar.gz is present.
+  save        Build an air-gap bundle (md-save.tar.gz): custom image + assets
+              + Docker packages. Does not deploy.
+  uninstall   Stop and remove the stack (backs up content first; MD_PURGE=true to skip)
+  status      Show container status and an HTTP health probe
+  version     Print installer and Caddy version info
+  help        Show this help
+
+Environment variables (override at runtime, e.g. sudo TCP_PORT=8080 ./install-md):
+  BASE_DIR        Install/data directory          (default: /opt/caddy-markdown)
+  SRV_DIR         Markdown content directory       (default: \$BASE_DIR/srv)
+  MGMT_IP         Bind IP address                  (default: first host IP)
+  FQDN            Server FQDN (TLS_FQDN alias)      (default: md.\$(hostname -f))
+  TCP_PORT        Listen port                      (default: 80)
+  TLS_MODE        none | internal | auto           (default: none)
+  BROWSER_TITLE   Browser tab title                (default: Markdown Server)
+  CADDY_VERSION   Caddy image tag                  (default: latest)
+  MAX_FOLDER_DEPTH  Folder nesting shown in sidebar/API  (default: 5)
+  AUTH_MODE         basic | none | forward (guards writes) (default: basic)
+  MD_ADMIN_USER     basic-auth user                      (default: admin)
+  MD_ADMIN_PASSWORD basic-auth password                  (default: changeme)
+  ENABLE_WEBDAV     enable /dav + /admin upload UI        (default: true)
+  FORWARD_AUTH_URL  IdP outpost URL (AUTH_MODE=forward)
+  MD_RESET        true = wipe content on install (backup still taken)   (default: false)
+  MD_PURGE        true = skip content backup on uninstall               (default: false)
+
+Read endpoints (served by the running site):
+  GET /raw/<path>.md      Raw markdown (text/markdown), no HTML layout
+  GET /<path>.md?raw=1    Same, via content negotiation
+  GET /api/files.json     JSON index of every .md file (recursive)
+  GET /llms.txt           Discovery hint for AI agents
+
+Write endpoints (when ENABLE_WEBDAV=true; auth per AUTH_MODE):
+  GET  /admin             Browser upload / create / edit / delete UI
+  WebDAV /dav/<path>      PUT / DELETE / MKCOL / MOVE (UI and AI agents)
 EOF
-else
-  echo "  Configuring with HTTPS on port: $TCP_PORT"
-  cat <<EOF > "$BASE_DIR/Caddyfile"
-{
-  default_sni $MGMT_IP
 }
-https://$FQDN:$TCP_PORT https://$MGMT_IP:$TCP_PORT {
+
+show_version() {
+    echo "install-md (markdown-server) v$SCRIPT_VERSION"
+    echo "CADDY_VERSION: $CADDY_VERSION  (image: $(md_image), builder: $(caddy_builder_tag))"
+    echo "custom image bundles the caddy-webdav module"
+}
+
+require_root() {
+    if [[ "$EUID" -ne 0 ]]; then
+        echo "This script must be run as root." >&2
+        exit 1
+    fi
+}
+
+detect_distro() {
+    if [[ ! -r /etc/os-release ]]; then
+        echo "Error: /etc/os-release not found; cannot detect OS." >&2
+        exit 1
+    fi
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    case "${ID:-}" in
+        ubuntu|debian|rhel|centos|rocky|almalinux|fedora|sles|opensuse-leap)
+            echo "  Detected supported OS: ${ID} ${VERSION_ID:-}" ;;
+        *)
+            echo "Error: Unknown or unsupported OS '${ID:-unknown}'." >&2
+            exit 1 ;;
+    esac
+}
+
+port_in_use() {
+    local p="$1"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnH "( sport = :$p )" 2>/dev/null | grep -q .
+    elif command -v netstat >/dev/null 2>&1; then
+        netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}\$"
+    else
+        return 1  # no probe available; assume free
+    fi
+}
+
+ensure_docker() {
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        echo "  Docker and compose plugin present."
+        return 0
+    fi
+    echo "  Docker or compose plugin missing — installing via images-pull-push (conventions §9)..."
+    mkdir -p "$BASE_DIR/utilities"
+    if [[ ! -x "$BASE_DIR/utilities/image_pull_push.sh" ]]; then
+        curl -sfL "$IPP_URL" -o "$BASE_DIR/utilities/image_pull_push.sh"
+        chmod +x "$BASE_DIR/utilities/image_pull_push.sh"
+    fi
+    ( cd "$BASE_DIR/utilities" && ./image_pull_push.sh docker )
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "Error: Docker installation did not complete successfully." >&2
+        exit 1
+    fi
+}
+
+# ---- Image / asset / air-gap helpers ----
+
+is_offline() { [[ -f "$(pwd)/$OFFLINE_SENTINEL" ]]; }
+
+caddy_builder_tag() {
+    if [[ "$CADDY_VERSION" == "latest" ]]; then echo "caddy:builder"; else echo "caddy:${CADDY_VERSION}-builder"; fi
+}
+caddy_runtime_tag() { echo "caddy:${CADDY_VERSION}"; }
+md_image()    { echo "${IMG_NAME}:${CADDY_VERSION}"; }
+image_tar()   { echo "markdown-caddy-image.tar.gz"; }
+
+generate_dockerfile() {
+    cat > "$BASE_DIR/Dockerfile" <<EOF
+# Custom Caddy build with the WebDAV module (used by the upload UI + agent writes).
+FROM $(caddy_builder_tag) AS builder
+RUN xcaddy build --with $WEBDAV_MODULE
+FROM $(caddy_runtime_tag)
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 EOF
-fi
-if [[ "$TLS_MODE" == "internal" ]]; then
-  cat <<'EOF' >> "$BASE_DIR/Caddyfile"
-    tls internal
-EOF
-fi
-cat <<'EOF' >> "$BASE_DIR/Caddyfile"
+}
+
+build_image() {
+    echo "  Building custom Caddy image $(md_image) (xcaddy + webdav)..."
+    generate_dockerfile
+    docker build -t "$(md_image)" -f "$BASE_DIR/Dockerfile" "$BASE_DIR"
+}
+
+fetch_assets() {
+    echo "  Vendoring front-end assets for local (air-gap-safe) serving..."
+    mkdir -p "$BASE_DIR/assets"
+    curl -sfL "$ASSET_CSS_MD" -o "$BASE_DIR/assets/github-markdown-dark.min.css"
+    curl -sfL "$ASSET_CSS_HL" -o "$BASE_DIR/assets/github-dark.min.css"
+    curl -sfL "$ASSET_JS_HL"  -o "$BASE_DIR/assets/highlight.min.js"
+}
+
+extract_offline_bundle() {
+    echo "  Extracting offline bundle ($OFFLINE_SENTINEL)..."
+    mkdir -p "$BASE_DIR/.offline"
+    rm -rf "$BASE_DIR/.offline"
+    mkdir -p "$BASE_DIR/.offline" "$BASE_DIR/assets"
+    tar xzf "$(pwd)/$OFFLINE_SENTINEL" -C "$BASE_DIR/.offline"
+    cp -a "$BASE_DIR/.offline/assets/." "$BASE_DIR/assets/"
+}
+
+ensure_docker_offline() {
+    if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+        echo "  Docker and compose plugin present."
+        return 0
+    fi
+    echo "  Docker missing — installing from bundled offline packages..."
+    local off="$BASE_DIR/.offline"
+    if [[ -f "$off/offline-packages.tar.gz" && -x "$off/install_packages.sh" ]]; then
+        ( cd "$off" && ./install_packages.sh offline docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin )
+    else
+        echo "Error: offline bundle has no Docker packages and Docker is not installed on this host." >&2
+        exit 1
+    fi
+    command -v docker >/dev/null 2>&1 || { echo "Error: offline Docker install failed." >&2; exit 1; }
+}
+
+load_offline_image() {
+    echo "  Loading custom Caddy image from bundle (no pull/build)..."
+    gunzip -c "$BASE_DIR/.offline/image/$(image_tar)" | docker load
+}
+
+auth_block() {
+    # Emits the auth directive for a write handle, per AUTH_MODE. Indented 8 spaces.
+    case "$AUTH_MODE" in
+        basic)
+            echo "        basic_auth {"
+            echo "            $MD_ADMIN_USER $ADMIN_HASH"
+            echo "        }"
+            ;;
+        forward)
+            echo "        forward_auth $FORWARD_AUTH_URL {"
+            echo "            uri /outpost.goauthentik.io/auth/caddy"
+            echo "            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email"
+            echo "        }"
+            ;;
+        none|*)
+            echo "        # AUTH_MODE=none: write access is UNAUTHENTICATED (anyone can write/delete)"
+            ;;
+    esac
+}
+
+emit_write_handles() {
+    echo
+    echo "    # Upload / manage UI (auth-gated)."
+    echo "    handle /admin* {"
+    auth_block
+    echo "        rewrite * /.admin.html"
+    echo "        file_server"
+    echo "    }"
+    echo
+    echo "    # WebDAV write API for the UI and AI agents (auth-gated)."
+    echo "    handle /dav/* {"
+    auth_block
+    echo "        uri strip_prefix /dav"
+    echo "        webdav"
+    echo "    }"
+}
+
+generate_caddyfile() {
+    local cfile="$BASE_DIR/Caddyfile"
+    : > "$cfile"
+
+    # Global options block — only emitted when something needs it.
+    if [[ "$ENABLE_WEBDAV" == "true" || "$TLS_MODE" == "internal" ]]; then
+        {
+            echo "{"
+            [[ "$ENABLE_WEBDAV" == "true" ]] && echo "    order webdav before file_server"
+            [[ "$TLS_MODE" == "internal" ]] && echo "    default_sni $MGMT_IP"
+            echo "}"
+        } >> "$cfile"
+    fi
+
+    local site
+    if [[ "$TLS_MODE" == "none" ]]; then
+        echo "  Configuring HTTP on port $TCP_PORT (any host — IP, hostname, or FQDN all work)"
+        site=":$TCP_PORT"
+    elif [[ "$TLS_MODE" == "internal" ]]; then
+        echo "  Configuring HTTPS (self-signed) on port $TCP_PORT for IP $MGMT_IP and FQDN $FQDN"
+        site="https://$MGMT_IP:$TCP_PORT https://$FQDN:$TCP_PORT"
+    else
+        echo "  Configuring HTTPS (Let's Encrypt) on port $TCP_PORT for FQDN $FQDN"
+        echo "  NOTE: TLS_MODE=auto needs a public, resolvable FQDN; IP-only access is not possible with Let's Encrypt."
+        site="$FQDN:$TCP_PORT"
+    fi
+
+    {
+        echo "$site {"
+        [[ "$TLS_MODE" == "internal" ]] && echo "    tls internal"
+        cat <<'ROUTES_HEAD'
     root * /srv
-    templates
-    file_server
 
-    @markdown_site {
-        path /
-        path *.md
+    # Vendored CSS/JS, served locally so the page renders fully offline.
+    handle /_assets/* {
+        root * /assets
+        uri strip_prefix /_assets
+        file_server
     }
-    rewrite @markdown_site /layout.html
-}
-EOF
 
-# 2. Layout HTML
-echo "  Generating layout.html..."
-cat <<EOF > "$SRV_DIR/layout.html"
+    # Raw markdown for AI agents (no HTML layout).
+    handle /raw/* {
+        uri strip_prefix /raw
+        header Content-Type "text/markdown; charset=utf-8"
+        file_server
+    }
+
+    # JSON index of every markdown file (live, recursive).
+    # templates only renders allowed MIME types, and the header sets
+    # application/json before templates runs — so add it to the mime list.
+    handle /api/files.json {
+        rewrite * /.files-index.html
+        header Content-Type "application/json; charset=utf-8"
+        templates {
+            mime application/json text/html
+        }
+        file_server
+    }
+
+    # Discovery hint for AI agents.
+    handle /llms.txt {
+        header Content-Type "text/plain; charset=utf-8"
+        respond `# Markdown Server
+This site renders Markdown as HTML. For raw/source access (AI agents):
+- Raw file:   GET /raw/<path>.md     (Content-Type: text/markdown)
+- Or append:  ?raw=1 to any .md URL
+- File index: GET /api/files.json     (JSON list of every .md path)
+- Write API:  WebDAV under /dav/ (PUT/DELETE/MKCOL/MOVE) when enabled
+` 200
+    }
+
+    # Content negotiation: ?raw=1 returns raw markdown without the layout.
+    @rawquery {
+        path *.md
+        query raw=1
+    }
+    handle @rawquery {
+        header Content-Type "text/markdown; charset=utf-8"
+        file_server
+    }
+ROUTES_HEAD
+
+        # Write path: WebDAV + admin UI (auth-gated), only when enabled.
+        if [[ "$ENABLE_WEBDAV" == "true" ]]; then
+            emit_write_handles
+        fi
+
+        cat <<'ROUTES_TAIL'
+
+    # Rendered Markdown site (folder sidebar + GitHub theme).
+    handle {
+        templates
+        @markdown_site path / *.md
+        rewrite @markdown_site /layout.html
+        file_server
+    }
+}
+ROUTES_TAIL
+    } >> "$cfile"
+}
+
+generate_layout() {
+    cat > "$SRV_DIR/layout.html" <<EOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>$BROWSER_TITLE</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/github-markdown-css/5.2.0/github-markdown-dark.min.css">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github-dark.min.css">
+    <link rel="stylesheet" href="/_assets/github-markdown-dark.min.css">
+    <link rel="stylesheet" href="/_assets/github-dark.min.css">
     <style>
         :root {
             --sidebar-bg: #0d1117;
@@ -86,32 +376,34 @@ cat <<EOF > "$SRV_DIR/layout.html"
             --sidebar-width: 195px;
         }
 
-        body { 
-            display: flex; margin: 0; height: 100vh; overflow: hidden; 
-            font-family: -apple-system, system-ui, sans-serif; 
-            background-color: var(--content-bg); color: var(--text-main); 
+        body {
+            display: flex; margin: 0; height: 100vh; overflow: hidden;
+            font-family: -apple-system, system-ui, sans-serif;
+            background-color: var(--content-bg); color: var(--text-main);
         }
 
-        nav { 
+        nav {
             width: var(--sidebar-width); min-width: 120px; max-width: 50vw;
-            box-sizing: border-box; background-color: var(--sidebar-bg); 
-            border-right: 1px solid var(--sidebar-border); 
-            padding: 25px 15px; overflow-y: auto; flex-shrink: 0; 
+            box-sizing: border-box; background-color: var(--sidebar-bg);
+            border-right: 1px solid var(--sidebar-border);
+            padding: 25px 15px; overflow-y: auto; flex-shrink: 0;
         }
 
         nav h3 { font-size: 10px; color: #8b949e; text-transform: uppercase; margin-bottom: 15px; letter-spacing: 1px; }
         nav ul { list-style: none; padding: 0; margin: 0; }
         nav li { margin-bottom: 4px; }
 
-        nav a { 
-            display: block; padding: 10px 12px; font-size: 13px; 
-            color: var(--link-color) !important; text-decoration: none !important; 
-            border-radius: 6px; white-space: nowrap; overflow: hidden; 
+        nav a {
+            display: block; padding: 10px 12px; font-size: 13px;
+            color: var(--link-color) !important; text-decoration: none !important;
+            border-radius: 6px; white-space: nowrap; overflow: hidden;
             text-overflow: ellipsis; min-height: 1.2em;
         }
-        
+
         nav a:hover { background-color: #21262d; color: var(--accent) !important; }
         nav a.active { background-color: #1f6feb; color: #ffffff !important; font-weight: 600; }
+
+        .depth-limit { display: block; padding: 8px 12px; font-size: 11px; color: #6e7681; font-style: italic; }
 
         /* Folder styles */
         .folder-toggle {
@@ -151,74 +443,49 @@ cat <<EOF > "$SRV_DIR/layout.html"
 </head>
 <body>
 
-<nav id="sidebar">
-  <h3>Navigation</h3>
-  <ul>
-    <li>
-      <a href="/"
-         class="{{ if or (eq .OriginalReq.URL.Path "/") (eq .OriginalReq.URL.Path "") }}active{{ end }}">
-        Home
-      </a>
-    </li>
-
-    {{/* 1) Collect root-level markdown files */}}
-    {{ \$rootFiles := list }}
-    {{ range listFiles "/" }}
-      {{ if and (hasSuffix ".md" .) (ne . "index.md") (ne . "layout.html") }}
-        {{ \$rootFiles = append \$rootFiles . }}
-      {{ end }}
+{{ define "navtree" }}
+  {{ \$dir := .dir }}{{ \$depth := .depth }}{{ \$max := .max }}{{ \$req := .req }}
+  {{/* markdown files directly in this directory (sorted) */}}
+  {{ \$files := list }}
+  {{ range listFiles \$dir }}
+    {{ if and (hasSuffix ".md" .) (not (and (eq \$dir "/") (eq . "index.md"))) }}
+      {{ \$files = append \$files . }}
     {{ end }}
-
-    {{/* 2) Render sorted root-level files */}}
-    {{ range sortAlpha \$rootFiles }}
-      <li>
-        <a href="/{{ . }}"
-           class="{{ if eq $.OriginalReq.URL.Path (printf "/%s" .) }}active{{ end }}">
-          {{ . | trimSuffix ".md" | replace "-" " " }}
-        </a>
-      </li>
+  {{ end }}
+  {{ range sortAlpha \$files }}
+    {{ \$href := printf "%s/%s" (trimSuffix "/" \$dir) . }}
+    <li><a href="{{ \$href }}" class="{{ if eq \$req \$href }}active{{ end }}">{{ . | trimSuffix ".md" | replace "-" " " }}</a></li>
+  {{ end }}
+  {{/* subdirectories: dotless names only (files have extensions) */}}
+  {{ \$dirs := list }}
+  {{ range listFiles \$dir }}
+    {{ if and (not (hasPrefix "." .)) (not (contains "." .)) }}
+      {{ \$dirs = append \$dirs . }}
     {{ end }}
-
-    {{/* 3) Collect subdirectories (non .md, non .html, non hidden entries) */}}
-    {{ \$dirs := list }}
-    {{ range listFiles "/" }}
-      {{ if and (not (hasSuffix ".md" .)) (not (hasSuffix ".html" .)) (not (hasPrefix "." .)) }}
-        {{ \$dirs = append \$dirs . }}
-      {{ end }}
-    {{ end }}
-
-    {{/* 4) Render sorted directories with their markdown files */}}
-    {{ range sortAlpha \$dirs }}
-      {{ \$dirName := . }}
-      {{ \$dirFiles := list }}
-      {{ range listFiles (printf "/%s" \$dirName) }}
-        {{ if hasSuffix ".md" . }}
-          {{ \$dirFiles = append \$dirFiles . }}
-        {{ end }}
-      {{ end }}
-      {{ if \$dirFiles }}
-        {{ \$hasActive := false }}
-        {{ range sortAlpha \$dirFiles }}
-          {{ if eq $.OriginalReq.URL.Path (printf "/%s/%s" \$dirName .) }}
-            {{ \$hasActive = true }}
-          {{ end }}
-        {{ end }}
-        <li class="folder{{ if \$hasActive }} expanded{{ end }}">
-          <div class="folder-toggle">{{ \$dirName | replace "-" " " }}</div>
+  {{ end }}
+  {{ if \$dirs }}
+    {{ if lt \$depth \$max }}
+      {{ range sortAlpha \$dirs }}
+        {{ \$child := printf "%s/%s" (trimSuffix "/" \$dir) . }}
+        {{ \$open := hasPrefix (printf "%s/" \$child) \$req }}
+        <li class="folder{{ if \$open }} expanded{{ end }}">
+          <div class="folder-toggle">{{ . | replace "-" " " }}</div>
           <ul class="folder-contents">
-            {{ range sortAlpha \$dirFiles }}
-              <li>
-                <a href="/{{ \$dirName }}/{{ . }}"
-                   class="{{ if eq $.OriginalReq.URL.Path (printf "/%s/%s" \$dirName .) }}active{{ end }}">
-                  {{ . | trimSuffix ".md" | replace "-" " " }}
-                </a>
-              </li>
-            {{ end }}
+            {{ template "navtree" (dict "dir" \$child "depth" (add \$depth 1) "max" \$max "req" \$req) }}
           </ul>
         </li>
       {{ end }}
+    {{ else }}
+      <li><span class="depth-limit">&#9888; {{ len \$dirs }} nested folder(s) beyond {{ \$max }} levels not shown</span></li>
     {{ end }}
-
+  {{ end }}
+{{ end }}
+<nav id="sidebar">
+  <h3>Navigation</h3>
+  <ul>
+    {{ \$req := \$.OriginalReq.URL.Path }}
+    <li><a href="/" class="{{ if or (eq \$req "/") (eq \$req "") }}active{{ end }}">Home</a></li>
+    {{ template "navtree" (dict "dir" "/" "depth" 1 "max" $MAX_FOLDER_DEPTH "req" \$req) }}
   </ul>
 </nav>
 
@@ -235,7 +502,7 @@ cat <<EOF > "$SRV_DIR/layout.html"
     </article>
 </main>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+<script src="/_assets/highlight.min.js"></script>
 <script>
     document.addEventListener('DOMContentLoaded', () => {
         hljs.highlightAll();
@@ -312,12 +579,147 @@ cat <<EOF > "$SRV_DIR/layout.html"
 </body>
 </html>
 EOF
+}
 
-# 3. Create Demo Content
-echo "  Generating example Markdown files..."
-cat <<EOF > "$SRV_DIR/index.md"
+generate_api_template() {
+    # Flat JSON index of every .md file, walked to a fixed depth of 5 (the default
+    # MAX_FOLDER_DEPTH). Stored as a dotfile (.html so the templates directive
+    # renders it) so it stays out of the sidebar/listing.
+    rm -f "$SRV_DIR/.files.json.tmpl"   # remove any pre-1.x variant
+    cat > "$SRV_DIR/.files-index.html" <<EOF
+{{- \$files := list -}}
+{{- \$trunc := false -}}
+{{- range \$a := listFiles "/" -}}{{- if hasSuffix ".md" \$a -}}{{- \$files = append \$files (printf "/%s" \$a) -}}{{- end -}}{{- end -}}
+{{- range \$a := listFiles "/" -}}{{- if and (not (hasPrefix "." \$a)) (not (contains "." \$a)) -}}
+  {{- \$pa := printf "/%s" \$a -}}
+  {{- range \$b := listFiles \$pa -}}{{- if hasSuffix ".md" \$b -}}{{- \$files = append \$files (printf "%s/%s" \$pa \$b) -}}{{- end -}}{{- end -}}
+  {{- range \$b := listFiles \$pa -}}{{- if and (not (hasPrefix "." \$b)) (not (contains "." \$b)) -}}
+    {{- \$pb := printf "%s/%s" \$pa \$b -}}
+    {{- range \$c := listFiles \$pb -}}{{- if hasSuffix ".md" \$c -}}{{- \$files = append \$files (printf "%s/%s" \$pb \$c) -}}{{- end -}}{{- end -}}
+    {{- range \$c := listFiles \$pb -}}{{- if and (not (hasPrefix "." \$c)) (not (contains "." \$c)) -}}
+      {{- \$pc := printf "%s/%s" \$pb \$c -}}
+      {{- range \$d := listFiles \$pc -}}{{- if hasSuffix ".md" \$d -}}{{- \$files = append \$files (printf "%s/%s" \$pc \$d) -}}{{- end -}}{{- end -}}
+      {{- range \$d := listFiles \$pc -}}{{- if and (not (hasPrefix "." \$d)) (not (contains "." \$d)) -}}
+        {{- \$pd := printf "%s/%s" \$pc \$d -}}
+        {{- range \$e := listFiles \$pd -}}{{- if hasSuffix ".md" \$e -}}{{- \$files = append \$files (printf "%s/%s" \$pd \$e) -}}{{- end -}}{{- end -}}
+        {{- range \$e := listFiles \$pd -}}{{- if and (not (hasPrefix "." \$e)) (not (contains "." \$e)) -}}{{- \$trunc = true -}}{{- end -}}{{- end -}}
+      {{- end -}}{{- end -}}
+    {{- end -}}{{- end -}}
+  {{- end -}}{{- end -}}
+{{- end -}}{{- end -}}
+{"generated":"{{ now | date "2006-01-02T15:04:05Z07:00" }}","maxDepth":$MAX_FOLDER_DEPTH,"truncatedDepth":{{ \$trunc }},"count":{{ len \$files }},"files":[{{ range \$i, \$p := (sortAlpha \$files) }}{{ if \$i }},{{ end }}{"path":"{{ \$p }}","name":"{{ base \$p }}","raw":"/raw{{ \$p }}"}{{ end }}]}
+EOF
+}
+
+generate_admin_ui() {
+    # Upload/manage UI. Stored as a dotfile so it stays out of the sidebar/listing.
+    # Written verbatim (quoted heredoc) then __MAX_DEPTH__ is substituted.
+    cat > "$SRV_DIR/.admin.html" <<'ADMINEOF'
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Markdown Admin</title>
+<style>
+ body{font-family:-apple-system,system-ui,sans-serif;background:#0d1117;color:#c9d1d9;margin:0;padding:24px;max-width:900px;}
+ h1{font-size:18px;} h2{font-size:13px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin:0 0 12px;}
+ a{color:#58a6ff;text-decoration:none;}
+ button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;margin:2px;}
+ button:hover{border-color:#58a6ff;} button.danger{color:#f85149;}
+ input,textarea{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px;font-family:inherit;font-size:13px;}
+ textarea{width:100%;height:260px;font-family:monospace;box-sizing:border-box;}
+ input[type=text]{width:55%;}
+ table{border-collapse:collapse;width:100%;} td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #21262d;font-size:13px;}
+ .msg{padding:8px 12px;border-radius:6px;margin:12px 0;display:none;}
+ .ok{background:#1a3a1a;color:#3fb950;} .err{background:#3a1a1a;color:#f85149;}
+ .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px;}
+</style></head><body>
+<h1>&#128221; Markdown Server &mdash; Admin</h1>
+<p><a href="/">&larr; back to site</a> &nbsp;|&nbsp; max folder depth: <b>__MAX_DEPTH__</b></p>
+<div id="msg" class="msg"></div>
+
+<div class="card"><h2>Upload files</h2>
+ <input type="file" id="up" multiple>
+ <input type="text" id="upDir" placeholder="target folder (blank = root)">
+ <button onclick="uploadFiles()">Upload</button></div>
+
+<div class="card"><h2>New / edit markdown</h2>
+ <input type="text" id="path" placeholder="path e.g. notes/page.md"><br><br>
+ <textarea id="content" placeholder="# Markdown content..."></textarea><br>
+ <button onclick="saveFile()">Save</button>
+ <button onclick="document.getElementById('content').value='';document.getElementById('path').value='';">Clear</button></div>
+
+<div class="card"><h2>New folder</h2>
+ <input type="text" id="newdir" placeholder="folder path e.g. notes/sub">
+ <button onclick="makeDir()">Create folder</button></div>
+
+<div class="card"><h2>Files <button onclick="loadFiles()">&#8635; refresh</button></h2>
+ <table id="files"><tbody></tbody></table></div>
+
+<script>
+const MAX_DEPTH = parseInt("__MAX_DEPTH__", 10);
+function show(t, ok){ const m=document.getElementById('msg'); m.textContent=t; m.className='msg '+(ok?'ok':'err'); m.style.display='block'; setTimeout(()=>m.style.display='none', 5000); }
+function davUrl(p){ return '/dav/' + p.replace(/^\/+/, ''); }
+function folderDepth(p){ return p.replace(/^\/+|\/+$/g,'').split('/').length; }
+async function loadFiles(){
+  try{
+    const d = await (await fetch('/api/files.json')).json();
+    const tb = document.querySelector('#files tbody'); tb.innerHTML='';
+    if(d.truncatedDepth){ const tr=tb.insertRow(); tr.innerHTML='<td colspan="3" style="color:#d29922">&#9888; some files are nested beyond '+d.maxDepth+' levels and are not listed</td>'; }
+    d.files.forEach(f=>{
+      const tr=tb.insertRow();
+      tr.innerHTML = '<td><a href="'+f.path+'">'+f.path+'</a></td>'+
+        '<td><button onclick="editFile(\''+f.path+'\')">edit</button></td>'+
+        '<td><button class="danger" onclick="delFile(\''+f.path+'\')">delete</button></td>';
+    });
+  }catch(e){ show('Failed to load file list: '+e, false); }
+}
+async function uploadFiles(){
+  const files = document.getElementById('up').files;
+  let dir = document.getElementById('upDir').value.trim().replace(/^\/+|\/+$/g,'');
+  if(!files.length){ show('Choose file(s) first', false); return; }
+  if(dir && folderDepth(dir) > MAX_DEPTH){ show('Folder too deep (max '+MAX_DEPTH+' levels)', false); return; }
+  for(const f of files){
+    const p = (dir?dir+'/':'') + f.name;
+    const r = await fetch(davUrl(p), {method:'PUT', body: await f.arrayBuffer()});
+    if(!r.ok){ show('Upload failed: '+f.name+' ('+r.status+')', false); return; }
+  }
+  show('Uploaded '+files.length+' file(s)', true); loadFiles();
+}
+async function saveFile(){
+  let p = document.getElementById('path').value.trim().replace(/^\/+/, '');
+  if(!p){ show('Enter a path', false); return; }
+  if(folderDepth(p) - 1 > MAX_DEPTH){ show('Path too deep (max '+MAX_DEPTH+' folder levels)', false); return; }
+  const r = await fetch(davUrl(p), {method:'PUT', body: document.getElementById('content').value});
+  if(r.ok){ show('Saved '+p, true); loadFiles(); } else { show('Save failed ('+r.status+')', false); }
+}
+async function editFile(path){
+  const t = await (await fetch('/raw'+path)).text();
+  document.getElementById('path').value = path.replace(/^\/+/, '');
+  document.getElementById('content').value = t;
+  window.scrollTo(0,0);
+}
+async function delFile(path){
+  if(!confirm('Delete '+path+'?')) return;
+  const r = await fetch(davUrl(path), {method:'DELETE'});
+  if(r.ok){ show('Deleted '+path, true); loadFiles(); } else { show('Delete failed ('+r.status+')', false); }
+}
+async function makeDir(){
+  let p = document.getElementById('newdir').value.trim().replace(/^\/+|\/+$/g,'');
+  if(!p){ show('Enter a folder path', false); return; }
+  if(folderDepth(p) > MAX_DEPTH){ show('Folder too deep — max '+MAX_DEPTH+' levels allowed', false); return; }
+  const r = await fetch(davUrl(p)+'/', {method:'MKCOL'});
+  if(r.ok){ show('Created folder '+p, true); loadFiles(); } else { show('Mkdir failed ('+r.status+') — parent folders must exist first', false); }
+}
+loadFiles();
+</script></body></html>
+ADMINEOF
+    sed -i "s/__MAX_DEPTH__/$MAX_FOLDER_DEPTH/g" "$SRV_DIR/.admin.html"
+}
+
+generate_demo_content() {
+    cat > "$SRV_DIR/index.md" <<EOF
 # Home Page
-This is the index.md file, which will always be at the top of the navigation sidebar. 
+This is the index.md file, which will always be at the top of the navigation sidebar.
 
 ## How to add Markdown pages to this site
 - Generate a markdown (.md) file
@@ -341,41 +743,39 @@ You can organize markdown files into subdirectories for better structure:
 |:---------|:---------|:---------|
 | First Topic   | [link](01-first-topic.md)   | Introduction to the docs   |
 | Copy Test   | [link](Copy-test.md)   | Discover the copy feature   |
-| Next Topic   | [link](next-topic-with-a-long-name.md)   | Testing long file names   |  
+| Next Topic   | [link](next-topic-with-a-long-name.md)   | Testing long file names   |
 | Tutorial: Getting Started   | [link](tutorials/getting-started.md)   | A page inside a folder   |
 
 EOF
 
-cat <<EOF > "$SRV_DIR/01-first-topic.md"
+    cat > "$SRV_DIR/01-first-topic.md" <<EOF
 # First Topic
-Markdown files are sorted alphabetically in the sidebar. You can prefix file names with numbers to control the order.  
-Here is a sample link:  
-[To the next topic](Copy-test.md)  
-[Back to Home](/) 
+Markdown files are sorted alphabetically in the sidebar. You can prefix file names with numbers to control the order.
+Here is a sample link:
+[To the next topic](Copy-test.md)
+[Back to Home](/)
 EOF
 
-cat <<EOF > "$SRV_DIR/Copy-test.md"
+    cat > "$SRV_DIR/Copy-test.md" <<EOF
 # Copy Test
-Supports github style code blocks with built in copy button. Test out the copy feature from the below code block:  
+Supports github style code blocks with built in copy button. Test out the copy feature from the below code block:
 \`\`\`
 echo "Hello World!"
 \`\`\`
-[Back to Home](/) 
+[Back to Home](/)
 EOF
 
-cat <<EOF > "$SRV_DIR/next-topic-with-a-long-name.md"
+    cat > "$SRV_DIR/next-topic-with-a-long-name.md" <<EOF
 # Next Topic
-This file is called \`next-topic-with-a-long-name.md\` to show that dashes are replaced with spaces in the sidebar links.  
-Headings are also title cased automatically.  
-You can also use longer file names to test text overflow handling in the sidebar links.  
-[Back to Home](/) 
+This file is called \`next-topic-with-a-long-name.md\` to show that dashes are replaced with spaces in the sidebar links.
+Headings are also title cased automatically.
+You can also use longer file names to test text overflow handling in the sidebar links.
+[Back to Home](/)
 EOF
 
-# 3b. Create demo subdirectory with sample files
-echo "  Generating example subdirectory (tutorials)..."
-mkdir -p "$SRV_DIR/tutorials"
+    mkdir -p "$SRV_DIR/tutorials"
 
-cat <<EOF > "$SRV_DIR/tutorials/getting-started.md"
+    cat > "$SRV_DIR/tutorials/getting-started.md" <<EOF
 # Getting Started
 This page lives inside the \`tutorials/\` subdirectory.
 
@@ -388,7 +788,7 @@ Folders appear in the sidebar as collapsible sections. Click the folder name to 
 [Back to Home](/)
 EOF
 
-cat <<EOF > "$SRV_DIR/tutorials/advanced-config.md"
+    cat > "$SRV_DIR/tutorials/advanced-config.md" <<EOF
 # Advanced Configuration
 This is another page inside the \`tutorials/\` folder, demonstrating that multiple files within a subdirectory are listed alphabetically.
 
@@ -399,31 +799,248 @@ This is another page inside the \`tutorials/\` folder, demonstrating that multip
 
 [Back to Home](/)
 EOF
+}
 
-# 4. Docker Compose
-echo "  Generating docker-compose.yml..."
-cat <<EOF > "$BASE_DIR/docker-compose.yml"
+generate_compose() {
+    cat > "$BASE_DIR/docker-compose.yml" <<EOF
 services:
   caddy:
-    image: caddy:latest
+    image: $(md_image)
+    pull_policy: never
     ports:
       - "$TCP_PORT:$TCP_PORT"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - ./srv:/srv
+      - ./assets:/assets
     restart: unless-stopped
 EOF
+}
 
-echo "Starting docker compose..."
-cd "$BASE_DIR" && docker compose up -d
-echo "### - Finished Markdown Server Installation - $(date) ###"
-echo
-echo "Setup complete!"
-echo "  Navigate to:"
-if [[ "$TLS_MODE" != "none" ]]; then
-    echo "    https://$MGMT_IP:$TCP_PORT"
-    echo "    https://$TLS_FQDN:$TCP_PORT"
-else
-    echo "    http://$MGMT_IP:$TCP_PORT"
-    echo "    http://$FQDN:$TCP_PORT"
-fi
+write_install_env() {
+    cat > "$BASE_DIR/.install-env" <<EOF
+# Generated by install-md v$SCRIPT_VERSION on $(date)
+BASE_DIR="$BASE_DIR"
+SRV_DIR="$SRV_DIR"
+TCP_PORT="$TCP_PORT"
+TLS_MODE="$TLS_MODE"
+FQDN="$FQDN"
+MGMT_IP="$MGMT_IP"
+CADDY_VERSION="$CADDY_VERSION"
+IMG="$(md_image)"
+AUTH_MODE="$AUTH_MODE"
+ENABLE_WEBDAV="$ENABLE_WEBDAV"
+EOF
+}
+
+print_access() {
+    local scheme="http"
+    [[ "$TLS_MODE" != "none" ]] && scheme="https"
+    echo
+    echo "Setup complete! Navigate to:"
+    echo "    $scheme://$MGMT_IP:$TCP_PORT"
+    echo "    $scheme://$FQDN:$TCP_PORT"
+    if [[ "$ENABLE_WEBDAV" == "true" ]]; then
+        echo "  Upload / manage UI:  $scheme://$MGMT_IP:$TCP_PORT/admin"
+        case "$AUTH_MODE" in
+            basic) echo "    auth: basic  (user: $MD_ADMIN_USER  pass: $MD_ADMIN_PASSWORD)  — change MD_ADMIN_PASSWORD!" ;;
+            none)  echo "    auth: NONE — /admin and /dav are unauthenticated (risky)" ;;
+            forward) echo "    auth: forward_auth -> $FORWARD_AUTH_URL" ;;
+        esac
+    fi
+}
+
+do_install() {
+    : > "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/md-install.log"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    echo "### - Starting Markdown Server installation - $(date) ###"
+    detect_distro
+    mkdir -p "$BASE_DIR"
+
+    local offline=false
+    if is_offline; then
+        offline=true
+        echo "  Offline bundle ($OFFLINE_SENTINEL) detected — installing without internet."
+        extract_offline_bundle
+        ensure_docker_offline
+    else
+        ensure_docker
+    fi
+
+    # Stop any existing stack first so the port frees up before we probe it.
+    if [[ -f "$BASE_DIR/docker-compose.yml" ]]; then
+        echo "  Stopping existing Markdown Server stack..."
+        docker compose -f "$BASE_DIR/docker-compose.yml" down >/dev/null 2>&1 || true
+    fi
+
+    if port_in_use "$TCP_PORT"; then
+        echo "Error: TCP port $TCP_PORT is already in use. Set TCP_PORT=<free port> or free the port." >&2
+        exit 1
+    fi
+
+    # Obtain the custom Caddy image: build it online, or load it from the bundle offline.
+    if [[ "$offline" == true ]]; then
+        load_offline_image
+    else
+        build_image
+        fetch_assets
+    fi
+
+    # Hash the admin password using the image's caddy binary (basic auth only).
+    if [[ "$ENABLE_WEBDAV" == "true" && "$AUTH_MODE" == "basic" ]]; then
+        echo "  Hashing admin password..."
+        ADMIN_HASH="$(docker run --rm "$(md_image)" caddy hash-password --plaintext "$MD_ADMIN_PASSWORD")"
+    fi
+
+    # Preserve existing user content (never silently destroy markdown files).
+    local preserve=false
+    if [[ -d "$SRV_DIR" && -n "$(ls -A "$SRV_DIR" 2>/dev/null)" ]]; then
+        local backup
+        backup="$(dirname "$BASE_DIR")/md-srv-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+        echo "  Backing up existing content ($SRV_DIR) -> $backup"
+        tar czf "$backup" -C "$SRV_DIR" .
+        preserve=true
+        if [[ "${MD_RESET:-false}" == "true" ]]; then
+            echo "  MD_RESET=true -> wiping existing content (backup retained at $backup)"
+            rm -rf "$SRV_DIR"
+            preserve=false
+        fi
+    fi
+
+    mkdir -p "$SRV_DIR"
+    echo "  Generating Caddyfile..."
+    generate_caddyfile
+    echo "  Generating layout.html..."
+    generate_layout
+    echo "  Generating API file-index template..."
+    generate_api_template
+    if [[ "$ENABLE_WEBDAV" == "true" ]]; then
+        echo "  Generating admin UI..."
+        generate_admin_ui
+    fi
+    echo "  Generating docker-compose.yml..."
+    generate_compose
+    if [[ "$preserve" == true ]]; then
+        echo "  Preserving existing markdown content (skipping demo files)."
+    else
+        echo "  Generating example Markdown files..."
+        generate_demo_content
+    fi
+    write_install_env
+
+    echo "  Starting docker compose..."
+    ( cd "$BASE_DIR" && docker compose up -d )
+
+    echo "### - Markdown Server installation finished - $(date) ###"
+    print_access
+}
+
+do_uninstall() {
+    : > "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/md-install.log"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    # Recover install-time paths (SRV_DIR etc.) so teardown matches the install.
+    # shellcheck disable=SC1091
+    [[ -f "$BASE_DIR/.install-env" ]] && . "$BASE_DIR/.install-env"
+    echo "### - Uninstalling Markdown Server - $(date) ###"
+    if [[ -f "$BASE_DIR/docker-compose.yml" ]]; then
+        docker compose -f "$BASE_DIR/docker-compose.yml" down >/dev/null 2>&1 || true
+    fi
+    # Remove the locally built/loaded image (rebuilt or reloaded on next install).
+    if [[ -n "${IMG:-}" ]]; then
+        docker rmi "$IMG" >/dev/null 2>&1 || true
+    fi
+    if [[ "${MD_PURGE:-false}" != "true" && -d "$SRV_DIR" && -n "$(ls -A "$SRV_DIR" 2>/dev/null)" ]]; then
+        local backup
+        backup="$(dirname "$BASE_DIR")/md-srv-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+        echo "  Backing up content before removal -> $backup"
+        tar czf "$backup" -C "$SRV_DIR" .
+        echo "  (set MD_PURGE=true to skip this backup)"
+    fi
+    rm -rf "$BASE_DIR"
+    echo "### - Markdown Server uninstalled - $(date) ###"
+}
+
+do_save() {
+    : > "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/md-install.log"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    echo "### - Building Markdown Server offline bundle - $(date) ###"
+    detect_distro
+    ensure_docker
+    mkdir -p "$BASE_DIR"
+    build_image
+    fetch_assets
+
+    local stage="$BASE_DIR/.save"
+    rm -rf "$stage"
+    mkdir -p "$stage/image" "$stage/assets"
+
+    echo "  Saving image $(md_image)..."
+    docker save "$(md_image)" | gzip > "$stage/image/$(image_tar)"
+    cp -a "$BASE_DIR/assets/." "$stage/assets/"
+
+    echo "  Bundling Docker packages for offline install (install-packages save)..."
+    mkdir -p "$BASE_DIR/utilities"
+    if [[ ! -x "$BASE_DIR/utilities/install_packages.sh" ]]; then
+        curl -sfL "https://github.com/Chubtoad5/install-packages/raw/refs/heads/main/install_packages.sh" \
+            -o "$BASE_DIR/utilities/install_packages.sh"
+        chmod +x "$BASE_DIR/utilities/install_packages.sh"
+    fi
+    cp "$BASE_DIR/utilities/install_packages.sh" "$stage/install_packages.sh"
+    if ( cd "$stage" && ./install_packages.sh save docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ); then
+        echo "  Docker packages bundled (offline-packages.tar.gz)."
+    else
+        echo "  WARNING: Docker package save failed; offline install will require Docker pre-installed on the target." >&2
+    fi
+
+    cat > "$stage/save-manifest.txt" <<EOF
+image=$(md_image)
+caddy_version=$CADDY_VERSION
+built=$(date)
+os=${ID:-unknown} ${VERSION_ID:-}
+EOF
+
+    local out="$(pwd)/$OFFLINE_SENTINEL"
+    echo "  Creating $out ..."
+    tar czf "$out" -C "$stage" .
+    rm -rf "$stage"
+    echo "### - Offline bundle ready: $out - $(date) ###"
+    echo "  NOTE: the bundle is OS-family/version specific (Docker packages)."
+    echo "  Transfer it to the target host's working directory and run:  sudo ./install-md install"
+}
+
+do_status() {
+    if [[ ! -f "$BASE_DIR/docker-compose.yml" ]]; then
+        echo "Markdown Server is not installed at $BASE_DIR."
+        exit 1
+    fi
+    # Recover install-time settings (port, TLS mode) for an accurate probe.
+    # shellcheck disable=SC1091
+    [[ -f "$BASE_DIR/.install-env" ]] && . "$BASE_DIR/.install-env"
+    docker compose -f "$BASE_DIR/docker-compose.yml" ps
+    local scheme="http"
+    [[ "$TLS_MODE" != "none" ]] && scheme="https"
+    # Probe via MGMT_IP (a configured site address); localhost would not match
+    # the host-scoped site blocks and would return an empty 200.
+    local code
+    code="$(curl -sk -o /dev/null -w '%{http_code}' "$scheme://$MGMT_IP:$TCP_PORT/" 2>/dev/null || echo 000)"
+    echo "HTTP probe ($scheme://$MGMT_IP:$TCP_PORT/): $code"
+}
+
+### ---- Dispatch ----
+CMD="${1:-install}"
+case "$CMD" in
+    help|-h|--help) usage; exit 0 ;;
+    version|--version) show_version; exit 0 ;;
+esac
+
+require_root
+case "$CMD" in
+    install)   do_install ;;
+    save)      do_save ;;
+    uninstall) do_uninstall ;;
+    status)    do_status ;;
+    *) echo "Unknown command: $CMD" >&2; echo; usage; exit 1 ;;
+esac
