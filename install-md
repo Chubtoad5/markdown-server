@@ -575,6 +575,9 @@ do_uninstall() {
     : > "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/md-install.log"
     exec > >(tee -a "$LOG_FILE") 2>&1
 
+    # Recover install-time paths (SRV_DIR etc.) so teardown matches the install.
+    # shellcheck disable=SC1091
+    [[ -f "$BASE_DIR/.install-env" ]] && . "$BASE_DIR/.install-env"
     echo "### - Uninstalling Markdown Server - $(date) ###"
     if [[ -f "$BASE_DIR/docker-compose.yml" ]]; then
         docker compose -f "$BASE_DIR/docker-compose.yml" down >/dev/null 2>&1 || true
@@ -595,12 +598,17 @@ do_status() {
         echo "Markdown Server is not installed at $BASE_DIR."
         exit 1
     fi
+    # Recover install-time settings (port, TLS mode) for an accurate probe.
+    # shellcheck disable=SC1091
+    [[ -f "$BASE_DIR/.install-env" ]] && . "$BASE_DIR/.install-env"
     docker compose -f "$BASE_DIR/docker-compose.yml" ps
     local scheme="http"
     [[ "$TLS_MODE" != "none" ]] && scheme="https"
+    # Probe via MGMT_IP (a configured site address); localhost would not match
+    # the host-scoped site blocks and would return an empty 200.
     local code
-    code="$(curl -sk -o /dev/null -w '%{http_code}' "$scheme://localhost:$TCP_PORT/" 2>/dev/null || echo 000)"
-    echo "HTTP probe ($scheme://localhost:$TCP_PORT/): $code"
+    code="$(curl -sk -o /dev/null -w '%{http_code}' "$scheme://$MGMT_IP:$TCP_PORT/" 2>/dev/null || echo 000)"
+    echo "HTTP probe ($scheme://$MGMT_IP:$TCP_PORT/): $code"
 }
 
 ### ---- Dispatch ----
