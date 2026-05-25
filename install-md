@@ -28,6 +28,12 @@ BROWSER_TITLE="${BROWSER_TITLE:-Markdown Server}"     # Browser tab title
 CADDY_VERSION="${CADDY_VERSION:-latest}"              # Caddy base image tag (latest -> caddy:builder)
 IMG_NAME="${IMG_NAME:-markdown-caddy}"                # Built (xcaddy+webdav) image repo name
 MAX_FOLDER_DEPTH="${MAX_FOLDER_DEPTH:-5}"             # Sidebar/API folder nesting depth (guardrail)
+AUTH_MODE="${AUTH_MODE:-basic}"                       # basic | none | forward — guards /admin + /dav writes
+MD_ADMIN_USER="${MD_ADMIN_USER:-admin}"               # basic-auth username
+MD_ADMIN_PASSWORD="${MD_ADMIN_PASSWORD:-changeme}"    # basic-auth password (CHANGE for production!)
+ENABLE_WEBDAV="${ENABLE_WEBDAV:-true}"                # enable WebDAV (/dav) + upload UI (/admin)
+FORWARD_AUTH_URL="${FORWARD_AUTH_URL:-}"              # AUTH_MODE=forward: IdP/Authentik outpost URL
+ADMIN_HASH=""                                         # bcrypt hash of MD_ADMIN_PASSWORD (computed at install)
 
 # Air-gap / asset settings
 OFFLINE_SENTINEL="md-save.tar.gz"                     # Presence in cwd triggers offline mode
@@ -67,14 +73,23 @@ Environment variables (override at runtime, e.g. sudo TCP_PORT=8080 ./install-md
   BROWSER_TITLE   Browser tab title                (default: Markdown Server)
   CADDY_VERSION   Caddy image tag                  (default: latest)
   MAX_FOLDER_DEPTH  Folder nesting shown in sidebar/API  (default: 5)
+  AUTH_MODE         basic | none | forward (guards writes) (default: basic)
+  MD_ADMIN_USER     basic-auth user                      (default: admin)
+  MD_ADMIN_PASSWORD basic-auth password                  (default: changeme)
+  ENABLE_WEBDAV     enable /dav + /admin upload UI        (default: true)
+  FORWARD_AUTH_URL  IdP outpost URL (AUTH_MODE=forward)
   MD_RESET        true = wipe content on install (backup still taken)   (default: false)
   MD_PURGE        true = skip content backup on uninstall               (default: false)
 
-Agent / API endpoints (served by the running site):
+Read endpoints (served by the running site):
   GET /raw/<path>.md      Raw markdown (text/markdown), no HTML layout
   GET /<path>.md?raw=1    Same, via content negotiation
   GET /api/files.json     JSON index of every .md file (recursive)
   GET /llms.txt           Discovery hint for AI agents
+
+Write endpoints (when ENABLE_WEBDAV=true; auth per AUTH_MODE):
+  GET  /admin             Browser upload / create / edit / delete UI
+  WebDAV /dav/<path>      PUT / DELETE / MKCOL / MOVE (UI and AI agents)
 EOF
 }
 
@@ -201,28 +216,74 @@ load_offline_image() {
     gunzip -c "$BASE_DIR/.offline/image/$(image_tar)" | docker load
 }
 
+auth_block() {
+    # Emits the auth directive for a write handle, per AUTH_MODE. Indented 8 spaces.
+    case "$AUTH_MODE" in
+        basic)
+            echo "        basic_auth {"
+            echo "            $MD_ADMIN_USER $ADMIN_HASH"
+            echo "        }"
+            ;;
+        forward)
+            echo "        forward_auth $FORWARD_AUTH_URL {"
+            echo "            uri /outpost.goauthentik.io/auth/caddy"
+            echo "            copy_headers X-Authentik-Username X-Authentik-Groups X-Authentik-Email"
+            echo "        }"
+            ;;
+        none|*)
+            echo "        # AUTH_MODE=none: write access is UNAUTHENTICATED (anyone can write/delete)"
+            ;;
+    esac
+}
+
+emit_write_handles() {
+    echo
+    echo "    # Upload / manage UI (auth-gated)."
+    echo "    handle /admin* {"
+    auth_block
+    echo "        rewrite * /.admin.html"
+    echo "        file_server"
+    echo "    }"
+    echo
+    echo "    # WebDAV write API for the UI and AI agents (auth-gated)."
+    echo "    handle /dav/* {"
+    auth_block
+    echo "        uri strip_prefix /dav"
+    echo "        webdav"
+    echo "    }"
+}
+
 generate_caddyfile() {
     local cfile="$BASE_DIR/Caddyfile"
+    : > "$cfile"
+
+    # Global options block — only emitted when something needs it.
+    if [[ "$ENABLE_WEBDAV" == "true" || "$TLS_MODE" == "internal" ]]; then
+        {
+            echo "{"
+            [[ "$ENABLE_WEBDAV" == "true" ]] && echo "    order webdav before file_server"
+            [[ "$TLS_MODE" == "internal" ]] && echo "    default_sni $MGMT_IP"
+            echo "}"
+        } >> "$cfile"
+    fi
+
     local site
     if [[ "$TLS_MODE" == "none" ]]; then
         echo "  Configuring HTTP on port $TCP_PORT (any host — IP, hostname, or FQDN all work)"
         site=":$TCP_PORT"
-        : > "$cfile"
     elif [[ "$TLS_MODE" == "internal" ]]; then
         echo "  Configuring HTTPS (self-signed) on port $TCP_PORT for IP $MGMT_IP and FQDN $FQDN"
-        printf '{\n  default_sni %s\n}\n' "$MGMT_IP" > "$cfile"
         site="https://$MGMT_IP:$TCP_PORT https://$FQDN:$TCP_PORT"
     else
         echo "  Configuring HTTPS (Let's Encrypt) on port $TCP_PORT for FQDN $FQDN"
         echo "  NOTE: TLS_MODE=auto needs a public, resolvable FQDN; IP-only access is not possible with Let's Encrypt."
         site="$FQDN:$TCP_PORT"
-        : > "$cfile"
     fi
 
     {
         echo "$site {"
         [[ "$TLS_MODE" == "internal" ]] && echo "    tls internal"
-        cat <<'ROUTES'
+        cat <<'ROUTES_HEAD'
     root * /srv
 
     # Vendored CSS/JS, served locally so the page renders fully offline.
@@ -259,6 +320,7 @@ This site renders Markdown as HTML. For raw/source access (AI agents):
 - Raw file:   GET /raw/<path>.md     (Content-Type: text/markdown)
 - Or append:  ?raw=1 to any .md URL
 - File index: GET /api/files.json     (JSON list of every .md path)
+- Write API:  WebDAV under /dav/ (PUT/DELETE/MKCOL/MOVE) when enabled
 ` 200
     }
 
@@ -271,6 +333,14 @@ This site renders Markdown as HTML. For raw/source access (AI agents):
         header Content-Type "text/markdown; charset=utf-8"
         file_server
     }
+ROUTES_HEAD
+
+        # Write path: WebDAV + admin UI (auth-gated), only when enabled.
+        if [[ "$ENABLE_WEBDAV" == "true" ]]; then
+            emit_write_handles
+        fi
+
+        cat <<'ROUTES_TAIL'
 
     # Rendered Markdown site (folder sidebar + GitHub theme).
     handle {
@@ -280,7 +350,7 @@ This site renders Markdown as HTML. For raw/source access (AI agents):
         file_server
     }
 }
-ROUTES
+ROUTES_TAIL
     } >> "$cfile"
 }
 
@@ -541,6 +611,111 @@ generate_api_template() {
 EOF
 }
 
+generate_admin_ui() {
+    # Upload/manage UI. Stored as a dotfile so it stays out of the sidebar/listing.
+    # Written verbatim (quoted heredoc) then __MAX_DEPTH__ is substituted.
+    cat > "$SRV_DIR/.admin.html" <<'ADMINEOF'
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Markdown Admin</title>
+<style>
+ body{font-family:-apple-system,system-ui,sans-serif;background:#0d1117;color:#c9d1d9;margin:0;padding:24px;max-width:900px;}
+ h1{font-size:18px;} h2{font-size:13px;color:#8b949e;text-transform:uppercase;letter-spacing:1px;margin:0 0 12px;}
+ a{color:#58a6ff;text-decoration:none;}
+ button{background:#21262d;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;margin:2px;}
+ button:hover{border-color:#58a6ff;} button.danger{color:#f85149;}
+ input,textarea{background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:8px;font-family:inherit;font-size:13px;}
+ textarea{width:100%;height:260px;font-family:monospace;box-sizing:border-box;}
+ input[type=text]{width:55%;}
+ table{border-collapse:collapse;width:100%;} td,th{text-align:left;padding:6px 8px;border-bottom:1px solid #21262d;font-size:13px;}
+ .msg{padding:8px 12px;border-radius:6px;margin:12px 0;display:none;}
+ .ok{background:#1a3a1a;color:#3fb950;} .err{background:#3a1a1a;color:#f85149;}
+ .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px;}
+</style></head><body>
+<h1>&#128221; Markdown Server &mdash; Admin</h1>
+<p><a href="/">&larr; back to site</a> &nbsp;|&nbsp; max folder depth: <b>__MAX_DEPTH__</b></p>
+<div id="msg" class="msg"></div>
+
+<div class="card"><h2>Upload files</h2>
+ <input type="file" id="up" multiple>
+ <input type="text" id="upDir" placeholder="target folder (blank = root)">
+ <button onclick="uploadFiles()">Upload</button></div>
+
+<div class="card"><h2>New / edit markdown</h2>
+ <input type="text" id="path" placeholder="path e.g. notes/page.md"><br><br>
+ <textarea id="content" placeholder="# Markdown content..."></textarea><br>
+ <button onclick="saveFile()">Save</button>
+ <button onclick="document.getElementById('content').value='';document.getElementById('path').value='';">Clear</button></div>
+
+<div class="card"><h2>New folder</h2>
+ <input type="text" id="newdir" placeholder="folder path e.g. notes/sub">
+ <button onclick="makeDir()">Create folder</button></div>
+
+<div class="card"><h2>Files <button onclick="loadFiles()">&#8635; refresh</button></h2>
+ <table id="files"><tbody></tbody></table></div>
+
+<script>
+const MAX_DEPTH = parseInt("__MAX_DEPTH__", 10);
+function show(t, ok){ const m=document.getElementById('msg'); m.textContent=t; m.className='msg '+(ok?'ok':'err'); m.style.display='block'; setTimeout(()=>m.style.display='none', 5000); }
+function davUrl(p){ return '/dav/' + p.replace(/^\/+/, ''); }
+function folderDepth(p){ return p.replace(/^\/+|\/+$/g,'').split('/').length; }
+async function loadFiles(){
+  try{
+    const d = await (await fetch('/api/files.json')).json();
+    const tb = document.querySelector('#files tbody'); tb.innerHTML='';
+    if(d.truncatedDepth){ const tr=tb.insertRow(); tr.innerHTML='<td colspan="3" style="color:#d29922">&#9888; some files are nested beyond '+d.maxDepth+' levels and are not listed</td>'; }
+    d.files.forEach(f=>{
+      const tr=tb.insertRow();
+      tr.innerHTML = '<td><a href="'+f.path+'">'+f.path+'</a></td>'+
+        '<td><button onclick="editFile(\''+f.path+'\')">edit</button></td>'+
+        '<td><button class="danger" onclick="delFile(\''+f.path+'\')">delete</button></td>';
+    });
+  }catch(e){ show('Failed to load file list: '+e, false); }
+}
+async function uploadFiles(){
+  const files = document.getElementById('up').files;
+  let dir = document.getElementById('upDir').value.trim().replace(/^\/+|\/+$/g,'');
+  if(!files.length){ show('Choose file(s) first', false); return; }
+  if(dir && folderDepth(dir) > MAX_DEPTH){ show('Folder too deep (max '+MAX_DEPTH+' levels)', false); return; }
+  for(const f of files){
+    const p = (dir?dir+'/':'') + f.name;
+    const r = await fetch(davUrl(p), {method:'PUT', body: await f.arrayBuffer()});
+    if(!r.ok){ show('Upload failed: '+f.name+' ('+r.status+')', false); return; }
+  }
+  show('Uploaded '+files.length+' file(s)', true); loadFiles();
+}
+async function saveFile(){
+  let p = document.getElementById('path').value.trim().replace(/^\/+/, '');
+  if(!p){ show('Enter a path', false); return; }
+  if(folderDepth(p) - 1 > MAX_DEPTH){ show('Path too deep (max '+MAX_DEPTH+' folder levels)', false); return; }
+  const r = await fetch(davUrl(p), {method:'PUT', body: document.getElementById('content').value});
+  if(r.ok){ show('Saved '+p, true); loadFiles(); } else { show('Save failed ('+r.status+')', false); }
+}
+async function editFile(path){
+  const t = await (await fetch('/raw'+path)).text();
+  document.getElementById('path').value = path.replace(/^\/+/, '');
+  document.getElementById('content').value = t;
+  window.scrollTo(0,0);
+}
+async function delFile(path){
+  if(!confirm('Delete '+path+'?')) return;
+  const r = await fetch(davUrl(path), {method:'DELETE'});
+  if(r.ok){ show('Deleted '+path, true); loadFiles(); } else { show('Delete failed ('+r.status+')', false); }
+}
+async function makeDir(){
+  let p = document.getElementById('newdir').value.trim().replace(/^\/+|\/+$/g,'');
+  if(!p){ show('Enter a folder path', false); return; }
+  if(folderDepth(p) > MAX_DEPTH){ show('Folder too deep — max '+MAX_DEPTH+' levels allowed', false); return; }
+  const r = await fetch(davUrl(p)+'/', {method:'MKCOL'});
+  if(r.ok){ show('Created folder '+p, true); loadFiles(); } else { show('Mkdir failed ('+r.status+') — parent folders must exist first', false); }
+}
+loadFiles();
+</script></body></html>
+ADMINEOF
+    sed -i "s/__MAX_DEPTH__/$MAX_FOLDER_DEPTH/g" "$SRV_DIR/.admin.html"
+}
+
 generate_demo_content() {
     cat > "$SRV_DIR/index.md" <<EOF
 # Home Page
@@ -653,6 +828,8 @@ FQDN="$FQDN"
 MGMT_IP="$MGMT_IP"
 CADDY_VERSION="$CADDY_VERSION"
 IMG="$(md_image)"
+AUTH_MODE="$AUTH_MODE"
+ENABLE_WEBDAV="$ENABLE_WEBDAV"
 EOF
 }
 
@@ -663,6 +840,14 @@ print_access() {
     echo "Setup complete! Navigate to:"
     echo "    $scheme://$MGMT_IP:$TCP_PORT"
     echo "    $scheme://$FQDN:$TCP_PORT"
+    if [[ "$ENABLE_WEBDAV" == "true" ]]; then
+        echo "  Upload / manage UI:  $scheme://$MGMT_IP:$TCP_PORT/admin"
+        case "$AUTH_MODE" in
+            basic) echo "    auth: basic  (user: $MD_ADMIN_USER  pass: $MD_ADMIN_PASSWORD)  — change MD_ADMIN_PASSWORD!" ;;
+            none)  echo "    auth: NONE — /admin and /dav are unauthenticated (risky)" ;;
+            forward) echo "    auth: forward_auth -> $FORWARD_AUTH_URL" ;;
+        esac
+    fi
 }
 
 do_install() {
@@ -702,6 +887,12 @@ do_install() {
         fetch_assets
     fi
 
+    # Hash the admin password using the image's caddy binary (basic auth only).
+    if [[ "$ENABLE_WEBDAV" == "true" && "$AUTH_MODE" == "basic" ]]; then
+        echo "  Hashing admin password..."
+        ADMIN_HASH="$(docker run --rm "$(md_image)" caddy hash-password --plaintext "$MD_ADMIN_PASSWORD")"
+    fi
+
     # Preserve existing user content (never silently destroy markdown files).
     local preserve=false
     if [[ -d "$SRV_DIR" && -n "$(ls -A "$SRV_DIR" 2>/dev/null)" ]]; then
@@ -724,6 +915,10 @@ do_install() {
     generate_layout
     echo "  Generating API file-index template..."
     generate_api_template
+    if [[ "$ENABLE_WEBDAV" == "true" ]]; then
+        echo "  Generating admin UI..."
+        generate_admin_ui
+    fi
     echo "  Generating docker-compose.yml..."
     generate_compose
     if [[ "$preserve" == true ]]; then
