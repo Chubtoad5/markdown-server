@@ -27,6 +27,7 @@ TLS_MODE="${TLS_MODE:-none}"                          # none | internal (self-si
 BROWSER_TITLE="${BROWSER_TITLE:-Markdown Server}"     # Browser tab title
 CADDY_VERSION="${CADDY_VERSION:-latest}"              # Caddy base image tag (latest -> caddy:builder)
 IMG_NAME="${IMG_NAME:-markdown-caddy}"                # Built (xcaddy+webdav) image repo name
+MAX_FOLDER_DEPTH="${MAX_FOLDER_DEPTH:-5}"             # Sidebar/API folder nesting depth (guardrail)
 
 # Air-gap / asset settings
 OFFLINE_SENTINEL="md-save.tar.gz"                     # Presence in cwd triggers offline mode
@@ -65,8 +66,15 @@ Environment variables (override at runtime, e.g. sudo TCP_PORT=8080 ./install-md
   TLS_MODE        none | internal | auto           (default: none)
   BROWSER_TITLE   Browser tab title                (default: Markdown Server)
   CADDY_VERSION   Caddy image tag                  (default: latest)
+  MAX_FOLDER_DEPTH  Folder nesting shown in sidebar/API  (default: 5)
   MD_RESET        true = wipe content on install (backup still taken)   (default: false)
   MD_PURGE        true = skip content backup on uninstall               (default: false)
+
+Agent / API endpoints (served by the running site):
+  GET /raw/<path>.md      Raw markdown (text/markdown), no HTML layout
+  GET /<path>.md?raw=1    Same, via content negotiation
+  GET /api/files.json     JSON index of every .md file (recursive)
+  GET /llms.txt           Discovery hint for AI agents
 EOF
 }
 
@@ -224,6 +232,46 @@ generate_caddyfile() {
         file_server
     }
 
+    # Raw markdown for AI agents (no HTML layout).
+    handle /raw/* {
+        uri strip_prefix /raw
+        header Content-Type "text/markdown; charset=utf-8"
+        file_server
+    }
+
+    # JSON index of every markdown file (live, recursive).
+    # templates only renders allowed MIME types, and the header sets
+    # application/json before templates runs — so add it to the mime list.
+    handle /api/files.json {
+        rewrite * /.files-index.html
+        header Content-Type "application/json; charset=utf-8"
+        templates {
+            mime application/json text/html
+        }
+        file_server
+    }
+
+    # Discovery hint for AI agents.
+    handle /llms.txt {
+        header Content-Type "text/plain; charset=utf-8"
+        respond `# Markdown Server
+This site renders Markdown as HTML. For raw/source access (AI agents):
+- Raw file:   GET /raw/<path>.md     (Content-Type: text/markdown)
+- Or append:  ?raw=1 to any .md URL
+- File index: GET /api/files.json     (JSON list of every .md path)
+` 200
+    }
+
+    # Content negotiation: ?raw=1 returns raw markdown without the layout.
+    @rawquery {
+        path *.md
+        query raw=1
+    }
+    handle @rawquery {
+        header Content-Type "text/markdown; charset=utf-8"
+        file_server
+    }
+
     # Rendered Markdown site (folder sidebar + GitHub theme).
     handle {
         templates
@@ -285,6 +333,8 @@ generate_layout() {
         nav a:hover { background-color: #21262d; color: var(--accent) !important; }
         nav a.active { background-color: #1f6feb; color: #ffffff !important; font-weight: 600; }
 
+        .depth-limit { display: block; padding: 8px 12px; font-size: 11px; color: #6e7681; font-style: italic; }
+
         /* Folder styles */
         .folder-toggle {
             display: flex; align-items: center; padding: 10px 12px; font-size: 13px;
@@ -323,74 +373,49 @@ generate_layout() {
 </head>
 <body>
 
-<nav id="sidebar">
-  <h3>Navigation</h3>
-  <ul>
-    <li>
-      <a href="/"
-         class="{{ if or (eq .OriginalReq.URL.Path "/") (eq .OriginalReq.URL.Path "") }}active{{ end }}">
-        Home
-      </a>
-    </li>
-
-    {{/* 1) Collect root-level markdown files */}}
-    {{ \$rootFiles := list }}
-    {{ range listFiles "/" }}
-      {{ if and (hasSuffix ".md" .) (ne . "index.md") (ne . "layout.html") }}
-        {{ \$rootFiles = append \$rootFiles . }}
-      {{ end }}
+{{ define "navtree" }}
+  {{ \$dir := .dir }}{{ \$depth := .depth }}{{ \$max := .max }}{{ \$req := .req }}
+  {{/* markdown files directly in this directory (sorted) */}}
+  {{ \$files := list }}
+  {{ range listFiles \$dir }}
+    {{ if and (hasSuffix ".md" .) (not (and (eq \$dir "/") (eq . "index.md"))) }}
+      {{ \$files = append \$files . }}
     {{ end }}
-
-    {{/* 2) Render sorted root-level files */}}
-    {{ range sortAlpha \$rootFiles }}
-      <li>
-        <a href="/{{ . }}"
-           class="{{ if eq $.OriginalReq.URL.Path (printf "/%s" .) }}active{{ end }}">
-          {{ . | trimSuffix ".md" | replace "-" " " }}
-        </a>
-      </li>
+  {{ end }}
+  {{ range sortAlpha \$files }}
+    {{ \$href := printf "%s/%s" (trimSuffix "/" \$dir) . }}
+    <li><a href="{{ \$href }}" class="{{ if eq \$req \$href }}active{{ end }}">{{ . | trimSuffix ".md" | replace "-" " " }}</a></li>
+  {{ end }}
+  {{/* subdirectories: dotless names only (files have extensions) */}}
+  {{ \$dirs := list }}
+  {{ range listFiles \$dir }}
+    {{ if and (not (hasPrefix "." .)) (not (contains "." .)) }}
+      {{ \$dirs = append \$dirs . }}
     {{ end }}
-
-    {{/* 3) Collect subdirectories (non .md, non .html, non hidden entries) */}}
-    {{ \$dirs := list }}
-    {{ range listFiles "/" }}
-      {{ if and (not (hasSuffix ".md" .)) (not (hasSuffix ".html" .)) (not (hasPrefix "." .)) }}
-        {{ \$dirs = append \$dirs . }}
-      {{ end }}
-    {{ end }}
-
-    {{/* 4) Render sorted directories with their markdown files */}}
-    {{ range sortAlpha \$dirs }}
-      {{ \$dirName := . }}
-      {{ \$dirFiles := list }}
-      {{ range listFiles (printf "/%s" \$dirName) }}
-        {{ if hasSuffix ".md" . }}
-          {{ \$dirFiles = append \$dirFiles . }}
-        {{ end }}
-      {{ end }}
-      {{ if \$dirFiles }}
-        {{ \$hasActive := false }}
-        {{ range sortAlpha \$dirFiles }}
-          {{ if eq $.OriginalReq.URL.Path (printf "/%s/%s" \$dirName .) }}
-            {{ \$hasActive = true }}
-          {{ end }}
-        {{ end }}
-        <li class="folder{{ if \$hasActive }} expanded{{ end }}">
-          <div class="folder-toggle">{{ \$dirName | replace "-" " " }}</div>
+  {{ end }}
+  {{ if \$dirs }}
+    {{ if lt \$depth \$max }}
+      {{ range sortAlpha \$dirs }}
+        {{ \$child := printf "%s/%s" (trimSuffix "/" \$dir) . }}
+        {{ \$open := hasPrefix (printf "%s/" \$child) \$req }}
+        <li class="folder{{ if \$open }} expanded{{ end }}">
+          <div class="folder-toggle">{{ . | replace "-" " " }}</div>
           <ul class="folder-contents">
-            {{ range sortAlpha \$dirFiles }}
-              <li>
-                <a href="/{{ \$dirName }}/{{ . }}"
-                   class="{{ if eq $.OriginalReq.URL.Path (printf "/%s/%s" \$dirName .) }}active{{ end }}">
-                  {{ . | trimSuffix ".md" | replace "-" " " }}
-                </a>
-              </li>
-            {{ end }}
+            {{ template "navtree" (dict "dir" \$child "depth" (add \$depth 1) "max" \$max "req" \$req) }}
           </ul>
         </li>
       {{ end }}
+    {{ else }}
+      <li><span class="depth-limit">&#9888; {{ len \$dirs }} nested folder(s) beyond {{ \$max }} levels not shown</span></li>
     {{ end }}
-
+  {{ end }}
+{{ end }}
+<nav id="sidebar">
+  <h3>Navigation</h3>
+  <ul>
+    {{ \$req := \$.OriginalReq.URL.Path }}
+    <li><a href="/" class="{{ if or (eq \$req "/") (eq \$req "") }}active{{ end }}">Home</a></li>
+    {{ template "navtree" (dict "dir" "/" "depth" 1 "max" $MAX_FOLDER_DEPTH "req" \$req) }}
   </ul>
 </nav>
 
@@ -483,6 +508,36 @@ generate_layout() {
 </script>
 </body>
 </html>
+EOF
+}
+
+generate_api_template() {
+    # Flat JSON index of every .md file, walked to a fixed depth of 5 (the default
+    # MAX_FOLDER_DEPTH). Stored as a dotfile (.html so the templates directive
+    # renders it) so it stays out of the sidebar/listing.
+    rm -f "$SRV_DIR/.files.json.tmpl"   # remove any pre-1.x variant
+    cat > "$SRV_DIR/.files-index.html" <<EOF
+{{- \$files := list -}}
+{{- \$trunc := false -}}
+{{- range \$a := listFiles "/" -}}{{- if hasSuffix ".md" \$a -}}{{- \$files = append \$files (printf "/%s" \$a) -}}{{- end -}}{{- end -}}
+{{- range \$a := listFiles "/" -}}{{- if and (not (hasPrefix "." \$a)) (not (contains "." \$a)) -}}
+  {{- \$pa := printf "/%s" \$a -}}
+  {{- range \$b := listFiles \$pa -}}{{- if hasSuffix ".md" \$b -}}{{- \$files = append \$files (printf "%s/%s" \$pa \$b) -}}{{- end -}}{{- end -}}
+  {{- range \$b := listFiles \$pa -}}{{- if and (not (hasPrefix "." \$b)) (not (contains "." \$b)) -}}
+    {{- \$pb := printf "%s/%s" \$pa \$b -}}
+    {{- range \$c := listFiles \$pb -}}{{- if hasSuffix ".md" \$c -}}{{- \$files = append \$files (printf "%s/%s" \$pb \$c) -}}{{- end -}}{{- end -}}
+    {{- range \$c := listFiles \$pb -}}{{- if and (not (hasPrefix "." \$c)) (not (contains "." \$c)) -}}
+      {{- \$pc := printf "%s/%s" \$pb \$c -}}
+      {{- range \$d := listFiles \$pc -}}{{- if hasSuffix ".md" \$d -}}{{- \$files = append \$files (printf "%s/%s" \$pc \$d) -}}{{- end -}}{{- end -}}
+      {{- range \$d := listFiles \$pc -}}{{- if and (not (hasPrefix "." \$d)) (not (contains "." \$d)) -}}
+        {{- \$pd := printf "%s/%s" \$pc \$d -}}
+        {{- range \$e := listFiles \$pd -}}{{- if hasSuffix ".md" \$e -}}{{- \$files = append \$files (printf "%s/%s" \$pd \$e) -}}{{- end -}}{{- end -}}
+        {{- range \$e := listFiles \$pd -}}{{- if and (not (hasPrefix "." \$e)) (not (contains "." \$e)) -}}{{- \$trunc = true -}}{{- end -}}{{- end -}}
+      {{- end -}}{{- end -}}
+    {{- end -}}{{- end -}}
+  {{- end -}}{{- end -}}
+{{- end -}}{{- end -}}
+{"generated":"{{ now | date "2006-01-02T15:04:05Z07:00" }}","maxDepth":$MAX_FOLDER_DEPTH,"truncatedDepth":{{ \$trunc }},"count":{{ len \$files }},"files":[{{ range \$i, \$p := (sortAlpha \$files) }}{{ if \$i }},{{ end }}{"path":"{{ \$p }}","name":"{{ base \$p }}","raw":"/raw{{ \$p }}"}{{ end }}]}
 EOF
 }
 
@@ -667,6 +722,8 @@ do_install() {
     generate_caddyfile
     echo "  Generating layout.html..."
     generate_layout
+    echo "  Generating API file-index template..."
+    generate_api_template
     echo "  Generating docker-compose.yml..."
     generate_compose
     if [[ "$preserve" == true ]]; then
