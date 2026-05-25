@@ -1,5 +1,10 @@
 # Changelog — markdown-server
 
+## 1.1.1 — Admin button in the sidebar (feature/admin-nav-button)
+
+### Added
+- An **"⚙ Admin" button** at the top of the left sidebar, above "Navigation", linking to `/admin`. Shown only when `ENABLE_WEBDAV=true`.
+
 ## 1.1.0 — Portability, air-gap, agent API, and upload UI (feature/portability-and-features)
 
 A ground-up hardening and feature pass on `install-md`. Validated end-to-end on lab

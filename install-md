@@ -355,6 +355,11 @@ ROUTES_TAIL
 }
 
 generate_layout() {
+    # Admin button shown above "Navigation" — only when the upload UI exists.
+    local admin_nav=""
+    if [[ "$ENABLE_WEBDAV" == "true" ]]; then
+        admin_nav='  <a href="/admin" class="admin-link">&#9881; Admin</a>'
+    fi
     cat > "$SRV_DIR/layout.html" <<EOF
 <!DOCTYPE html>
 <html lang="en">
@@ -404,6 +409,9 @@ generate_layout() {
         nav a.active { background-color: #1f6feb; color: #ffffff !important; font-weight: 600; }
 
         .depth-limit { display: block; padding: 8px 12px; font-size: 11px; color: #6e7681; font-style: italic; }
+
+        .admin-link { display: block; margin-bottom: 18px; padding: 8px 12px; font-size: 13px; text-align: center; background-color: #21262d; color: var(--text-main) !important; border: 1px solid #30363d; border-radius: 6px; font-weight: 600; text-decoration: none !important; }
+        .admin-link:hover { border-color: var(--accent); color: var(--accent) !important; }
 
         /* Folder styles */
         .folder-toggle {
@@ -481,6 +489,7 @@ generate_layout() {
   {{ end }}
 {{ end }}
 <nav id="sidebar">
+$admin_nav
   <h3>Navigation</h3>
   <ul>
     {{ \$req := \$.OriginalReq.URL.Path }}
