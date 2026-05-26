@@ -1,5 +1,31 @@
 # Changelog — markdown-server
 
+## 1.2.0 — Private registry push/pull (feature/registry-push-pull)
+
+Push the custom image to an OCI registry (e.g. Harbor) or pull-and-run it from one,
+mirroring the `-registry`/`push` conventions of the sibling Chubtoad5 installers.
+Validated end-to-end on lab host 192.168.10.201 against a real Harbor (push, pull-and-run,
+`save push`, and an offline-bundle regression check).
+
+### Added
+- **`push` command token** — builds the image, then pushes it to the registry. Valid with
+  `install` and `save`. Requires `-registry`.
+- **`-registry <host:port> <user> <pass>`** — three positional args (matching rke2/seaweedfs),
+  or the `REGISTRY_INFO` / `REG_USER` / `REG_PASS` env-vars. Validates scheme/port/FQDN-or-IP/creds.
+  - *with `push`* → build (or load from bundle) then push.
+  - *without `push`* → **skip the build** and pull-and-run the image from the registry (`install` only).
+- **`REGISTRY_NS`** (default `library`) — registry project/namespace; image lands as
+  `<host:port>/<REGISTRY_NS>/markdown-caddy:<CADDY_VERSION>`.
+- Automatic trust of a self-signed/internal registry CA (via `image_pull_push.sh reg-cert`).
+
+### Changed
+- **Assets are now baked into the image** (`COPY assets /assets`) instead of bind-mounted, so a
+  registry-pulled (or offline-loaded) image renders fully offline with no CDN and no host volume.
+  The `./assets` mount was removed from the compose file; a `.dockerignore` keeps the build context tiny.
+- Compose `image:` and `pull_policy:` are now mode-aware: the registry ref with `pull_policy: missing`
+  when a registry is in play, else the local build with `pull_policy: never`.
+- `save` no longer stages a separate `assets/` dir in the bundle (assets travel inside the image).
+
 ## 1.1.1 — Admin button in the sidebar (feature/admin-nav-button)
 
 ### Added

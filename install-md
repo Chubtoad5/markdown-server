@@ -11,10 +11,16 @@
 # offline install (auto-detected when md-save.tar.gz is present). The agent
 # API and upload UI arrive in later phases; the custom image already bundles
 # the caddy-webdav module so those phases only add Caddyfile routes.
+#
+# Private registry (v1.2): `push` builds then pushes the custom image to an OCI
+# registry (e.g. Harbor); `-registry <host:port> <user> <pass>` alone skips the
+# build and pulls-and-runs that pushed image instead. The image bakes its assets
+# in, so a registry-pulled image renders fully offline. Conventions mirror the
+# sibling installers (rke2/seaweedfs): `-registry` takes three positional args.
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 IPP_URL="https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh"
 
 ### ---- USER DEFINED VARIABLES (all runtime-overridable: sudo VAR=value ./install-md) ----
@@ -35,6 +41,20 @@ ENABLE_WEBDAV="${ENABLE_WEBDAV:-true}"                # enable WebDAV (/dav) + u
 FORWARD_AUTH_URL="${FORWARD_AUTH_URL:-}"              # AUTH_MODE=forward: IdP/Authentik outpost URL
 ADMIN_HASH=""                                         # bcrypt hash of MD_ADMIN_PASSWORD (computed at install)
 
+# Private registry (push to / pull-and-run from an OCI registry, e.g. Harbor).
+# Primary input is the `-registry <host:port> <user> <pass>` CLI triple; these
+# env-vars are the fallback (and keep the password out of `ps` when preferred).
+REGISTRY_INFO="${REGISTRY_INFO:-}"                    # <host:port> of the private registry
+REG_USER="${REG_USER:-}"                              # registry username
+REG_PASS="${REG_PASS:-}"                              # registry password
+REGISTRY_NS="${REGISTRY_NS:-library}"                 # registry project/namespace (Harbor default: library)
+PUSH_MODE=0                                           # set by the `push` command token
+REGISTRY_MODE=0                                       # set when a registry is provided
+REG_FQDN=""                                           # derived from REGISTRY_INFO
+REG_PORT=""                                           # derived from REGISTRY_INFO
+FQDN_PATTERN='^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+IPV4_PATTERN='^([0-9]{1,3}\.){3}[0-9]{1,3}$'
+
 # Air-gap / asset settings
 OFFLINE_SENTINEL="md-save.tar.gz"                     # Presence in cwd triggers offline mode
 WEBDAV_MODULE="github.com/mholt/caddy-webdav"         # Caddy module baked into the custom image
@@ -51,17 +71,37 @@ usage() {
     cat <<EOF
 install-md — Markdown Server installer (Chubtoad5) v$SCRIPT_VERSION
 
-Usage: sudo [VAR=value ...] ./install-md [command]
+Usage: sudo [VAR=value ...] ./install-md [command] [push] [-registry <host:port> <user> <pass>]
 
 Commands:
   install     Install or refresh the Markdown Server (default if omitted).
               Offline install is automatic when ./md-save.tar.gz is present.
-  save        Build an air-gap bundle (md-save.tar.gz): custom image + assets
-              + Docker packages. Does not deploy.
+  save        Build an air-gap bundle (md-save.tar.gz): custom image
+              + Docker packages. Does not deploy. (Combine with 'push' to also
+              push the freshly built image to a registry.)
   uninstall   Stop and remove the stack (backs up content first; MD_PURGE=true to skip)
   status      Show container status and an HTTP health probe
   version     Print installer and Caddy version info
   help        Show this help
+
+Private registry:
+  push                          Build the custom image, then push it to the registry.
+                                Requires -registry. Valid with 'install' and 'save'.
+  -registry <host:port> <user> <pass>
+                                Target OCI registry (e.g. Harbor). Three positional
+                                args, matching the sibling installers.
+                                * with push    -> build (or load from bundle) then push.
+                                * without push -> SKIP the build and pull-and-run the
+                                                  image from the registry (valid with
+                                                  'install' only).
+                                The image is pushed as <host:port>/<REGISTRY_NS>/markdown-caddy:<ver>
+                                (REGISTRY_NS default: library). Credentials may instead
+                                be supplied via REGISTRY_INFO / REG_USER / REG_PASS env-vars.
+
+Examples:
+  sudo ./install-md install push -registry harbor.lab:443 admin Harbor12345   # build + push + run from registry
+  sudo ./install-md install -registry harbor.lab:443 admin Harbor12345        # pull-and-run (no build)
+  sudo ./install-md save push -registry harbor.lab:443 admin Harbor12345      # build + air-gap bundle + push
 
 Environment variables (override at runtime, e.g. sudo TCP_PORT=8080 ./install-md):
   BASE_DIR        Install/data directory          (default: /opt/caddy-markdown)
@@ -80,6 +120,10 @@ Environment variables (override at runtime, e.g. sudo TCP_PORT=8080 ./install-md
   FORWARD_AUTH_URL  IdP outpost URL (AUTH_MODE=forward)
   MD_RESET        true = wipe content on install (backup still taken)   (default: false)
   MD_PURGE        true = skip content backup on uninstall               (default: false)
+  REGISTRY_NS     Registry project/namespace for the image             (default: library)
+  REGISTRY_INFO   Registry <host:port> (env-var alternative to -registry)
+  REG_USER        Registry username (env-var alternative)
+  REG_PASS        Registry password (env-var alternative)
 
 Read endpoints (served by the running site):
   GET /raw/<path>.md      Raw markdown (text/markdown), no HTML layout
@@ -133,22 +177,67 @@ port_in_use() {
     fi
 }
 
+# Download the shared images-pull-push helper once (used for Docker install,
+# registry-cert trust, etc.) so all callers reuse the same copy.
+ensure_ipp() {
+    mkdir -p "$BASE_DIR/utilities"
+    if [[ ! -x "$BASE_DIR/utilities/image_pull_push.sh" ]]; then
+        curl -sfL "$IPP_URL" -o "$BASE_DIR/utilities/image_pull_push.sh"
+        chmod +x "$BASE_DIR/utilities/image_pull_push.sh"
+    fi
+}
+
 ensure_docker() {
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
         echo "  Docker and compose plugin present."
         return 0
     fi
     echo "  Docker or compose plugin missing — installing via images-pull-push (conventions §9)..."
-    mkdir -p "$BASE_DIR/utilities"
-    if [[ ! -x "$BASE_DIR/utilities/image_pull_push.sh" ]]; then
-        curl -sfL "$IPP_URL" -o "$BASE_DIR/utilities/image_pull_push.sh"
-        chmod +x "$BASE_DIR/utilities/image_pull_push.sh"
-    fi
+    ensure_ipp
     ( cd "$BASE_DIR/utilities" && ./image_pull_push.sh docker )
     if ! command -v docker >/dev/null 2>&1; then
         echo "Error: Docker installation did not complete successfully." >&2
         exit 1
     fi
+}
+
+# ---- Private registry helpers ----
+
+# Fully-qualified image reference in the private registry. Bare image name
+# (markdown-caddy) lands under the REGISTRY_NS project — matches how
+# image_pull_push and Harbor namespace unscoped images (default: library/).
+registry_image_ref() { echo "${REG_FQDN}:${REG_PORT}/${REGISTRY_NS}/${IMG_NAME}:${CADDY_VERSION}"; }
+
+# The image the compose file actually runs: the registry ref whenever a registry
+# is in play (push or pull), otherwise the locally built image.
+runtime_image() {
+    if [[ $PUSH_MODE -eq 1 || $REGISTRY_MODE -eq 1 ]]; then registry_image_ref; else md_image; fi
+}
+
+# Retrieve + trust the registry's TLS certificate (Harbor self-signed CA, etc.)
+# via the shared helper. Soft-fail: a publicly-trusted CA needs no local trust.
+ensure_reg_cert() {
+    echo "  Trusting the registry TLS certificate ($REGISTRY_INFO)..."
+    ensure_ipp
+    if ! ( cd "$BASE_DIR/utilities" && ./image_pull_push.sh reg-cert "$REGISTRY_INFO" ); then
+        echo "  NOTE: reg-cert step did not complete; continuing (OK if the registry uses a public CA)."
+    fi
+}
+
+registry_login() {
+    echo "  Logging in to registry $REG_FQDN:$REG_PORT as $REG_USER..."
+    docker login "$REG_FQDN:$REG_PORT" --username "$REG_USER" --password-stdin <<< "$REG_PASS"
+}
+
+# Tag the locally built image with its registry ref and push it. (The shared
+# image_pull_push 'push' can't be used here: it pulls every image from the
+# internet first, but markdown-caddy exists only as a local build.)
+push_image() {
+    local ref; ref="$(registry_image_ref)"
+    echo "  Tagging $(md_image) -> $ref and pushing..."
+    docker tag "$(md_image)" "$ref"
+    docker push "$ref"
+    echo "  Pushed $ref"
 }
 
 # ---- Image / asset / air-gap helpers ----
@@ -169,11 +258,21 @@ FROM $(caddy_builder_tag) AS builder
 RUN xcaddy build --with $WEBDAV_MODULE
 FROM $(caddy_runtime_tag)
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+# Bake the vendored front-end assets into the image so a registry-pulled (or
+# offline-loaded) image renders fully — no bind-mount or CDN needed at runtime.
+COPY assets /assets
+EOF
+    # Keep the build context tiny: only the assets dir is needed (the Dockerfile
+    # itself is passed via -f). Avoids shipping srv/, bundles, utilities, etc.
+    cat > "$BASE_DIR/.dockerignore" <<'EOF'
+*
+!assets
 EOF
 }
 
 build_image() {
-    echo "  Building custom Caddy image $(md_image) (xcaddy + webdav)..."
+    echo "  Building custom Caddy image $(md_image) (xcaddy + webdav, assets baked in)..."
+    [[ -d "$BASE_DIR/assets" && -n "$(ls -A "$BASE_DIR/assets" 2>/dev/null)" ]] || fetch_assets
     generate_dockerfile
     docker build -t "$(md_image)" -f "$BASE_DIR/Dockerfile" "$BASE_DIR"
 }
@@ -188,11 +287,9 @@ fetch_assets() {
 
 extract_offline_bundle() {
     echo "  Extracting offline bundle ($OFFLINE_SENTINEL)..."
-    mkdir -p "$BASE_DIR/.offline"
     rm -rf "$BASE_DIR/.offline"
-    mkdir -p "$BASE_DIR/.offline" "$BASE_DIR/assets"
+    mkdir -p "$BASE_DIR/.offline"
     tar xzf "$(pwd)/$OFFLINE_SENTINEL" -C "$BASE_DIR/.offline"
-    cp -a "$BASE_DIR/.offline/assets/." "$BASE_DIR/assets/"
 }
 
 ensure_docker_offline() {
@@ -811,17 +908,25 @@ EOF
 }
 
 generate_compose() {
+    local img pull_policy
+    img="$(runtime_image)"
+    # Registry image -> allow a pull; local-only build -> never reach out.
+    if [[ $PUSH_MODE -eq 1 || $REGISTRY_MODE -eq 1 ]]; then
+        pull_policy="missing"
+    else
+        pull_policy="never"
+    fi
+    # No ./assets mount: assets are baked into the image (portable + offline-safe).
     cat > "$BASE_DIR/docker-compose.yml" <<EOF
 services:
   caddy:
-    image: $(md_image)
-    pull_policy: never
+    image: $img
+    pull_policy: $pull_policy
     ports:
       - "$TCP_PORT:$TCP_PORT"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - ./srv:/srv
-      - ./assets:/assets
     restart: unless-stopped
 EOF
 }
@@ -836,7 +941,9 @@ TLS_MODE="$TLS_MODE"
 FQDN="$FQDN"
 MGMT_IP="$MGMT_IP"
 CADDY_VERSION="$CADDY_VERSION"
-IMG="$(md_image)"
+IMG="$(runtime_image)"
+REGISTRY_MODE="$REGISTRY_MODE"
+PUSH_MODE="$PUSH_MODE"
 AUTH_MODE="$AUTH_MODE"
 ENABLE_WEBDAV="$ENABLE_WEBDAV"
 EOF
@@ -888,18 +995,32 @@ do_install() {
         exit 1
     fi
 
-    # Obtain the custom Caddy image: build it online, or load it from the bundle offline.
-    if [[ "$offline" == true ]]; then
+    # Obtain the runtime image, by mode:
+    #   registry pull (registry, no push) -> pull from the registry, skip the build
+    #   offline bundle                    -> load from md-save.tar.gz
+    #   push / plain online               -> build locally (assets baked in)
+    if [[ $REGISTRY_MODE -eq 1 && $PUSH_MODE -eq 0 ]]; then
+        echo "  Registry mode (no push): pulling $(registry_image_ref) — skipping build."
+        ensure_reg_cert
+        registry_login
+        docker pull "$(registry_image_ref)"
+    elif [[ "$offline" == true ]]; then
         load_offline_image
     else
         build_image
-        fetch_assets
     fi
 
-    # Hash the admin password using the image's caddy binary (basic auth only).
+    # Push the freshly built/loaded image to the private registry, if requested.
+    if [[ $PUSH_MODE -eq 1 ]]; then
+        ensure_reg_cert
+        registry_login
+        push_image
+    fi
+
+    # Hash the admin password using the runtime image's caddy binary (basic auth only).
     if [[ "$ENABLE_WEBDAV" == "true" && "$AUTH_MODE" == "basic" ]]; then
         echo "  Hashing admin password..."
-        ADMIN_HASH="$(docker run --rm "$(md_image)" caddy hash-password --plaintext "$MD_ADMIN_PASSWORD")"
+        ADMIN_HASH="$(docker run --rm "$(runtime_image)" caddy hash-password --plaintext "$MD_ADMIN_PASSWORD")"
     fi
 
     # Preserve existing user content (never silently destroy markdown files).
@@ -979,16 +1100,14 @@ do_save() {
     detect_distro
     ensure_docker
     mkdir -p "$BASE_DIR"
-    build_image
-    fetch_assets
+    build_image   # assets are vendored + baked into the image
 
     local stage="$BASE_DIR/.save"
     rm -rf "$stage"
-    mkdir -p "$stage/image" "$stage/assets"
+    mkdir -p "$stage/image"
 
     echo "  Saving image $(md_image)..."
     docker save "$(md_image)" | gzip > "$stage/image/$(image_tar)"
-    cp -a "$BASE_DIR/assets/." "$stage/assets/"
 
     echo "  Bundling Docker packages for offline install (install-packages save)..."
     mkdir -p "$BASE_DIR/utilities"
@@ -1018,6 +1137,14 @@ EOF
     echo "### - Offline bundle ready: $out - $(date) ###"
     echo "  NOTE: the bundle is OS-family/version specific (Docker packages)."
     echo "  Transfer it to the target host's working directory and run:  sudo ./install-md install"
+
+    # `save push` also pushes the freshly built image to the private registry.
+    if [[ $PUSH_MODE -eq 1 ]]; then
+        echo "### - Pushing image to registry ($REG_FQDN:$REG_PORT) - $(date) ###"
+        ensure_reg_cert
+        registry_login
+        push_image
+    fi
 }
 
 do_status() {
@@ -1038,13 +1165,79 @@ do_status() {
     echo "HTTP probe ($scheme://$MGMT_IP:$TCP_PORT/): $code"
 }
 
-### ---- Dispatch ----
-CMD="${1:-install}"
+### ---- Argument parsing ----
+# Shape:  ./install-md [command] [push] [-registry <host:port> <user> <pass>]
+# The command is the first token unless it is a flag or `push` (then: install).
+CMD="install"
+if [[ $# -gt 0 && "$1" != -* && "$1" != "push" ]]; then
+    CMD="$1"; shift
+fi
+
 case "$CMD" in
     help|-h|--help) usage; exit 0 ;;
     version|--version) show_version; exit 0 ;;
 esac
 
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        push)
+            PUSH_MODE=1; shift ;;
+        -registry)
+            REGISTRY_INFO="${2:-}"; REG_USER="${3:-}"; REG_PASS="${4:-}"
+            if [[ -z "$REGISTRY_INFO" || -z "$REG_USER" || -z "$REG_PASS" ]]; then
+                echo "Error: -registry requires <host:port> <username> <password>." >&2
+                echo; usage; exit 1
+            fi
+            shift 4 ;;
+        *)
+            echo "Error: unknown argument '$1'." >&2; echo; usage; exit 1 ;;
+    esac
+done
+
+# A registry supplied by env-var (REGISTRY_INFO) also enables registry mode.
+[[ -n "$REGISTRY_INFO" ]] && REGISTRY_MODE=1
+
+### ---- Registry validation ----
+if [[ $PUSH_MODE -eq 1 && $REGISTRY_MODE -eq 0 ]]; then
+    echo "Error: 'push' requires a registry (-registry <host:port> <user> <pass> or REGISTRY_INFO env-var)." >&2
+    echo; usage; exit 1
+fi
+if [[ $REGISTRY_MODE -eq 1 ]]; then
+    if [[ "$REGISTRY_INFO" =~ ^https?:// ]]; then
+        echo "Error: registry must be <host:port> with no http:// or https:// scheme." >&2; exit 1
+    fi
+    REG_FQDN="${REGISTRY_INFO%%:*}"
+    REG_PORT="${REGISTRY_INFO##*:}"
+    if [[ "$REG_FQDN" == "$REGISTRY_INFO" || -z "$REG_PORT" ]]; then
+        echo "Error: registry must include a port, e.g. harbor.example.com:443." >&2; exit 1
+    fi
+    if ! [[ "$REG_FQDN" =~ $FQDN_PATTERN || "$REG_FQDN" =~ $IPV4_PATTERN ]]; then
+        echo "Error: '$REG_FQDN' is not a valid FQDN or IPv4 address." >&2; exit 1
+    fi
+    if ! [[ "$REG_PORT" =~ ^[0-9]+$ ]] || (( REG_PORT < 1 || REG_PORT > 65535 )); then
+        echo "Error: registry port '$REG_PORT' must be between 1 and 65535." >&2; exit 1
+    fi
+    if [[ -z "$REG_USER" || -z "$REG_PASS" ]]; then
+        echo "Error: registry username and password are required (REG_USER / REG_PASS)." >&2; exit 1
+    fi
+fi
+# push / -registry only apply to install (and push to save). Pull-only (-registry
+# without push) is meaningless for save, which builds a bundle rather than deploying.
+case "$CMD" in
+    install) : ;;
+    save)
+        if [[ $REGISTRY_MODE -eq 1 && $PUSH_MODE -eq 0 ]]; then
+            echo "Error: 'save' supports 'push -registry ...' but not -registry alone (save builds a bundle, it does not pull-and-run)." >&2
+            exit 1
+        fi ;;
+    *)
+        if [[ $PUSH_MODE -eq 1 || $REGISTRY_MODE -eq 1 ]]; then
+            echo "Error: push/-registry are only valid with 'install' (and 'save push')." >&2
+            exit 1
+        fi ;;
+esac
+
+### ---- Dispatch ----
 require_root
 case "$CMD" in
     install)   do_install ;;
