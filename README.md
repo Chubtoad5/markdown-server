@@ -10,7 +10,8 @@ Serve a directory of Markdown files as a browsable website, using Caddy in Docke
 - **Upload / manage UI** — `/admin`: upload, create, edit, delete, and make folders. Backed by WebDAV (`/dav/`), which AI agents can also use to write files.
 - **Auth** — HTTP basic auth by default; or none; or `forward_auth` to an external IdP.
 - **TLS** — none (HTTP), Caddy self-signed (`internal`), or Let's Encrypt (`auto`).
-- **Air-gap** — `save` builds a self-contained bundle (image + assets + Docker packages); offline install needs no internet (assets are vendored locally, not pulled from a CDN).
+- **Air-gap** — `save` builds a self-contained bundle (image + Docker packages); offline install needs no internet. Front-end CSS/JS are vendored and **baked into the image**, so it renders fully offline with no CDN.
+- **Private registry** — `push` builds the image and pushes it to an OCI registry (e.g. Harbor); `-registry` alone skips the build and **pulls-and-runs** that image. Because assets are baked in, the pushed image is a complete, portable artifact.
 - **Runtime env-var overrides** and a clean CLI — no editing the script.
 
 ## Requirements
@@ -44,6 +45,24 @@ sudo TCP_PORT=8088 BROWSER_TITLE="My Docs" MD_ADMIN_PASSWORD='s3cret' ./install-
 | `uninstall` | Stop + remove the stack and image (backs up content first). |
 | `status` | Container status + HTTP health probe. |
 | `version` / `help` | Info / usage. |
+| `push` (option) | With `-registry`: build, then push the image to the registry. Combine with `install` or `save`. |
+
+## Private registry (Harbor, etc.)
+
+Push the custom image to an OCI registry, or pull-and-run it from one — credentials are three positional args after `-registry` (matching the sibling Chubtoad5 installers), or the `REGISTRY_INFO` / `REG_USER` / `REG_PASS` env-vars.
+
+```bash
+# Build the image and push it to the registry (then run from the registry ref):
+sudo ./install-md install push -registry harbor.example.com:443 admin 's3cret'
+
+# On another host: skip the build, pull-and-run the pushed image:
+sudo ./install-md install -registry harbor.example.com:443 admin 's3cret'
+
+# Build an air-gap bundle AND push the image in one go:
+sudo ./install-md save push -registry harbor.example.com:443 admin 's3cret'
+```
+
+The image is pushed as `<host:port>/<REGISTRY_NS>/markdown-caddy:<CADDY_VERSION>` (`REGISTRY_NS` defaults to `library`, Harbor's default project). A self-signed/internal registry CA is fetched and trusted automatically. `-registry` without `push` (pull-and-run) is valid with `install` only.
 
 ## Configuration (environment variables)
 
@@ -65,6 +84,9 @@ sudo TCP_PORT=8088 BROWSER_TITLE="My Docs" MD_ADMIN_PASSWORD='s3cret' ./install-
 | `FORWARD_AUTH_URL` | (empty) | `AUTH_MODE=forward`: IdP outpost URL |
 | `MD_RESET` | `false` | Wipe content on install (backup still taken) |
 | `MD_PURGE` | `false` | Skip the content backup on uninstall |
+| `REGISTRY_NS` | `library` | Registry project/namespace for the pushed image |
+| `REGISTRY_INFO` | (empty) | Registry `host:port` (env-var alternative to `-registry`) |
+| `REG_USER` / `REG_PASS` | (empty) | Registry credentials (env-var alternative) |
 
 ## Adding content
 
