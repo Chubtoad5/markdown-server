@@ -2,6 +2,23 @@
 
 Serve a directory of Markdown files as a browsable website, using Caddy in Docker. Features a folder-hierarchy sidebar, GitHub dark theme, code copy buttons, an upload/manage UI, an agent-readable API, and full air-gap support.
 
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Commands](#commands)
+- [Private registry (Harbor, etc.)](#private-registry-harbor-etc)
+- [Configuration (environment variables)](#configuration-environment-variables)
+- [Adding content](#adding-content)
+- [Reading content programmatically (AI agents)](#reading-content-programmatically-ai-agents)
+- [Air-gapped install](#air-gapped-install)
+- [License](#license)
+
+---
+
 ## Features
 
 - **Live rendering** — drop `.md` files into the content directory; refresh, no restart.
