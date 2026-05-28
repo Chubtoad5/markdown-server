@@ -23,6 +23,7 @@ Serve a directory of Markdown files as a browsable website, using Caddy in Docke
 
 - **Live rendering** — drop `.md` files into the content directory; refresh, no restart.
 - **Folder sidebar** — nested folders (collapsible) up to a configurable depth, with a clear guardrail notice when content is nested deeper.
+- **Collapsible sidebar** — toggle the left navigation in/out for a full-width reading view; auto-collapsed on phones and slides in as a drawer when needed.
 - **Agent-friendly API** — raw markdown at `/raw/<path>.md` (or `?raw=1`), a live JSON index at `/api/files.json`, and an `/llms.txt` hint.
 - **Upload / manage UI** — `/admin`: upload, create, edit, delete, and make folders. Backed by WebDAV (`/dav/`), which AI agents can also use to write files.
 - **Auth** — HTTP basic auth by default; or none; or `forward_auth` to an external IdP.
