@@ -1,5 +1,27 @@
 # Changelog — markdown-server
 
+## 1.3.0 — Collapsible sidebar (feature/collapsible-sidebar)
+
+Make the left navigation sidebar collapsible so the markdown view can use the full
+viewport width — especially useful on phones and other narrow screens.
+
+### Added
+- **Toggle button** (☰ / ‹‹) fixed at the top-left of the page. Click to collapse the
+  sidebar to width 0 (desktop) or slide it off-canvas (mobile). Click again to restore.
+- **Persistence** — collapsed/expanded state stored in `localStorage.mdSidebarCollapsed`,
+  alongside the existing `mdSidebarWidth` drag-resize key.
+- **Mobile defaults** — at viewports ≤768 px the sidebar becomes a slide-in drawer with a
+  dimmed backdrop, and starts **collapsed by default** on first visit (no localStorage entry).
+  Tapping the backdrop closes the drawer.
+- ARIA: `aria-label`, `aria-controls`, and `aria-expanded` on the toggle button.
+
+### Unchanged
+- The drag-resize handle still works (desktop, expanded only). When collapsed or on
+  mobile widths it is hidden so it can't fight the new state.
+- Admin button, folder expand/collapse, navtree depth limit, auth/TLS modes, the
+  agent API (`/api/files.json`, `/raw/<path>.md`, `/llms.txt`), and the WebDAV admin
+  UI are all untouched. No backend, compose, or Caddyfile changes.
+
 ## 1.2.0 — Private registry push/pull (feature/registry-push-pull)
 
 Push the custom image to an OCI registry (e.g. Harbor) or pull-and-run it from one,

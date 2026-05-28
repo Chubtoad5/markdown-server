@@ -488,7 +488,40 @@ generate_layout() {
             width: var(--sidebar-width); min-width: 120px; max-width: 50vw;
             box-sizing: border-box; background-color: var(--sidebar-bg);
             border-right: 1px solid var(--sidebar-border);
-            padding: 25px 15px; overflow-y: auto; flex-shrink: 0;
+            padding: 52px 15px 25px; overflow-y: auto; flex-shrink: 0;
+            transition: width 0.2s ease, min-width 0.2s ease,
+                        padding 0.2s ease, border-right-color 0.2s ease;
+        }
+
+        /* Sidebar collapsed state (desktop): width 0, no border, hide contents */
+        body.sidebar-collapsed nav {
+            width: 0 !important; min-width: 0;
+            padding-left: 0; padding-right: 0;
+            border-right-color: transparent;
+            overflow: hidden;
+        }
+        body.sidebar-collapsed .resize-handle { display: none; }
+
+        /* Toggle button (fixed top-left, always visible) */
+        #sidebarToggle {
+            position: fixed; top: 10px; left: 10px; z-index: 100;
+            width: 32px; height: 32px; padding: 0;
+            display: flex; align-items: center; justify-content: center;
+            background-color: #21262d; color: var(--text-main);
+            border: 1px solid var(--sidebar-border); border-radius: 6px;
+            font-size: 14px; line-height: 1; cursor: pointer;
+            transition: border-color 0.15s, color 0.15s;
+        }
+        #sidebarToggle:hover { border-color: var(--accent); color: var(--accent); }
+        #sidebarToggle .icon-open,
+        #sidebarToggle .icon-close { display: none; }
+        body.sidebar-collapsed #sidebarToggle .icon-open { display: inline; }
+        body:not(.sidebar-collapsed) #sidebarToggle .icon-close { display: inline; }
+
+        /* Mobile backdrop (only shown when drawer is open at mobile widths) */
+        #sidebarBackdrop {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0,0,0,0.5); z-index: 80;
         }
 
         nav h3 { font-size: 10px; color: #8b949e; text-transform: uppercase; margin-bottom: 15px; letter-spacing: 1px; }
@@ -544,9 +577,34 @@ generate_layout() {
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: var(--sidebar-bg); }
         ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
+
+        /* Mobile: sidebar becomes a slide-in drawer; drag-resize hidden */
+        @media (max-width: 768px) {
+            nav {
+                position: fixed; top: 0; left: 0; height: 100vh;
+                width: min(80vw, 280px); max-width: 80vw;
+                z-index: 90; box-shadow: 2px 0 12px rgba(0,0,0,0.5);
+                transform: translateX(0);
+                transition: transform 0.2s ease;
+            }
+            body.sidebar-collapsed nav {
+                transform: translateX(-100%);
+                width: min(80vw, 280px) !important;
+                padding: 52px 15px 25px;
+                border-right-color: var(--sidebar-border);
+            }
+            .resize-handle { display: none; }
+            body:not(.sidebar-collapsed) #sidebarBackdrop { display: block; }
+            .markdown-body { padding: 50px 20px 20px; }
+        }
     </style>
 </head>
 <body>
+
+<button id="sidebarToggle" type="button" aria-label="Toggle navigation sidebar" aria-controls="sidebar" aria-expanded="true">
+    <span class="icon-open">&#9776;</span><span class="icon-close">&#10094;&#10094;</span>
+</button>
+<div id="sidebarBackdrop" aria-hidden="true"></div>
 
 {{ define "navtree" }}
   {{ \$dir := .dir }}{{ \$depth := .depth }}{{ \$max := .max }}{{ \$req := .req }}
@@ -641,21 +699,54 @@ $admin_nav
             });
         });
 
-        // Sidebar resize with mouse drag
+        // Sidebar collapse/expand (with mobile-default + persistence)
         const sidebar = document.getElementById('sidebar');
+        const toggleBtn = document.getElementById('sidebarToggle');
+        const backdrop = document.getElementById('sidebarBackdrop');
+        const MOBILE_BREAKPOINT = 768;
+        const isMobile = () => window.innerWidth <= MOBILE_BREAKPOINT;
+
+        const savedCollapsed = localStorage.getItem('mdSidebarCollapsed');
+        const startCollapsed = (savedCollapsed === null) ? isMobile() : (savedCollapsed === 'true');
+        document.body.classList.toggle('sidebar-collapsed', startCollapsed);
+        toggleBtn.setAttribute('aria-expanded', String(!startCollapsed));
+
+        const restoreSavedWidth = () => {
+            // Desktop only: re-apply the user's last drag-resized width.
+            if (isMobile()) { sidebar.style.width = ''; return; }
+            const savedWidth = localStorage.getItem('mdSidebarWidth');
+            if (savedWidth) {
+                const w = parseInt(savedWidth, 10);
+                if (w >= 120 && w <= window.innerWidth * 0.5) {
+                    sidebar.style.width = w + 'px';
+                }
+            }
+        };
+        if (!startCollapsed) restoreSavedWidth();
+
+        const setCollapsed = (collapsed) => {
+            document.body.classList.toggle('sidebar-collapsed', collapsed);
+            toggleBtn.setAttribute('aria-expanded', String(!collapsed));
+            localStorage.setItem('mdSidebarCollapsed', String(collapsed));
+            if (collapsed) {
+                // Clear inline width so the .sidebar-collapsed rule (width: 0) wins.
+                sidebar.style.width = '';
+            } else {
+                restoreSavedWidth();
+            }
+        };
+
+        toggleBtn.addEventListener('click', () => {
+            setCollapsed(!document.body.classList.contains('sidebar-collapsed'));
+        });
+        backdrop.addEventListener('click', () => setCollapsed(true));
+
+        // Sidebar resize with mouse drag (desktop, expanded state only)
         const handle = document.getElementById('resizeHandle');
         let isResizing = false;
 
-        // Restore saved sidebar width
-        const savedWidth = localStorage.getItem('mdSidebarWidth');
-        if (savedWidth) {
-            const w = parseInt(savedWidth, 10);
-            if (w >= 120 && w <= window.innerWidth * 0.5) {
-                sidebar.style.width = w + 'px';
-            }
-        }
-
         handle.addEventListener('mousedown', (e) => {
+            if (document.body.classList.contains('sidebar-collapsed') || isMobile()) return;
             isResizing = true;
             handle.classList.add('active');
             document.body.style.cursor = 'col-resize';
@@ -842,6 +933,7 @@ You can organize markdown files into subdirectories for better structure:
 - Place \`.md\` files inside the subdirectory
 - Folders appear in the sidebar and can be expanded or collapsed by clicking on them
 - The sidebar is resizable by dragging its right edge
+- Click the ☰ button (top-left) to collapse the sidebar entirely for a full-width view; on phones the sidebar starts collapsed and slides in as a drawer
 - Root-level \`.md\` files continue to appear as a flat list above any folders
 
 ## Table For Reference
@@ -901,7 +993,7 @@ This is another page inside the \`tutorials/\` folder, demonstrating that multip
 ## Tips
 - Prefix file names with numbers to control sort order (e.g. \`01-setup.md\`, \`02-usage.md\`)
 - Dashes in file names are displayed as spaces in the sidebar
-- The sidebar can be resized by dragging its right edge
+- The sidebar can be resized by dragging its right edge, or collapsed entirely with the ☰ button (top-left) — handy on mobile
 
 [Back to Home](/)
 EOF
