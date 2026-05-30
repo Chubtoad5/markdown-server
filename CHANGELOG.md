@@ -1,5 +1,31 @@
 # Changelog — markdown-server
 
+## 1.5.0 — Images & media in markdown (feature/media-embeds)
+
+Display images, video files, audio files, and YouTube links in pages by pointing the
+markdown at a local path or a URL — no hand-written HTML required.
+
+### Added
+- **Auto-embed** (client-side, scoped to the rendered article): a video/audio file or a
+  YouTube link written as plain markdown on **its own line** becomes a real player/embed —
+  `![](clip.mp4)` → `<video>`, `![](song.mp3)` → `<audio>`, `[t](https://youtu.be/ID)` →
+  a responsive 16:9 YouTube `<iframe>`. YouTube IDs are sanitised and the embed URL rebuilt
+  (no injection); players are built via DOM APIs, never `innerHTML` of page content.
+- **Responsive media + click-to-enlarge** — images, video, audio, and embeds are constrained
+  to the content width; real images get `loading="lazy"` and enlarge in an **in-page lightbox
+  modal** on click (click the backdrop or press Esc to close — no new tab).
+- **Uploader guidance** — the `/admin` upload input now has an `accept` filter for supported
+  types (images / video / audio / `.md`; multi-select already supported), plus a how-it-works
+  note in the Upload and edit cards.
+- **Discoverable demo** — a text-based `media-sample.svg` and an `images-and-media.md` page in
+  the generated demo content; README gains an "Images & media" section.
+
+### Unchanged
+- No server change: media files were already served by `file_server`, and goldmark's raw-HTML
+  passthrough is untouched, so raw `<video>` / `<iframe>` still work for power users. Images
+  via `![](path|url)` already rendered — this adds players/embeds + responsiveness on top.
+  `/api/files.json` still indexes `.md` only. No Caddyfile / Dockerfile / compose changes.
+
 ## 1.4.2 — Nested-folder depth shading (feature/nest-depth-shading)
 
 Make the folder hierarchy in the sidebar easier to scan, on top of the existing

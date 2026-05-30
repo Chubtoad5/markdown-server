@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.4.2"
+SCRIPT_VERSION="1.5.0"
 IPP_URL="https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh"
 
 ### ---- USER DEFINED VARIABLES (all runtime-overridable: sudo VAR=value ./install-md) ----
@@ -587,6 +587,25 @@ generate_layout() {
         .copy-code-button { position: absolute; top: 10px; right: 10px; padding: 4px 8px; background-color: #21262d; color: #8b949e; border: 1px solid #30363d; border-radius: 6px; font-size: 11px; cursor: pointer; opacity: 0; transition: opacity 0.2s; z-index: 10; }
         pre:hover .copy-code-button { opacity: 1; }
 
+        /* Media: keep images / video / audio / embeds inside the content width */
+        .markdown-body img { max-width: 100%; height: auto; border-radius: 6px; }
+        .markdown-body img.img-zoom { cursor: zoom-in; }
+        .markdown-body video { max-width: 100%; border-radius: 6px; background: #000; min-height: 160px; }
+        .markdown-body audio { width: 100%; max-width: 100%; }
+        .markdown-body iframe { max-width: 100%; }
+        /* Responsive 16:9 wrapper for auto-embedded YouTube */
+        .markdown-body .video-embed { position: relative; width: 100%; max-width: 720px; aspect-ratio: 16 / 9; margin: 16px 0; }
+        .markdown-body .video-embed iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; border-radius: 6px; }
+
+        /* Lightbox modal: enlarge an article image in-page (no new tab). The image is
+           scaled to fill the viewport (up or down) preserving aspect ratio; a click
+           anywhere or Esc closes it. */
+        .img-modal { display: none; position: fixed; inset: 0; z-index: 200; background: rgba(1,4,9,0.9); cursor: zoom-out; }
+        .img-modal.open { display: flex; align-items: center; justify-content: center; }
+        .img-modal-content { width: 94vw; height: 92vh; object-fit: contain; cursor: zoom-out; }
+        .img-modal-close { position: fixed; top: 12px; right: 22px; font-size: 34px; line-height: 1; color: #c9d1d9; cursor: pointer; user-select: none; z-index: 201; }
+        .img-modal-close:hover { color: #fff; }
+
         ::-webkit-scrollbar { width: 8px; }
         ::-webkit-scrollbar-track { background: var(--sidebar-bg); }
         ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 10px; }
@@ -732,6 +751,122 @@ $admin_nav
             codeBlock.appendChild(button);
         });
 
+        // Media: auto-embed video files, audio files, and YouTube links written as plain
+        // markdown (![](clip.mp4) / ![](song.mp3) / [t](https://youtu.be/ID) on their own
+        // line), and make real images responsive + click-to-enlarge. Raw <video>/<iframe>
+        // authored directly in markdown still pass through untouched. Scoped to the article.
+        // Build a single in-page lightbox modal and return an open(src, alt) function.
+        function setupLightbox(){
+            const modal = document.createElement('div');
+            modal.className = 'img-modal';
+            modal.setAttribute('aria-hidden', 'true');
+            const big = document.createElement('img');
+            big.className = 'img-modal-content';
+            big.alt = '';
+            const close = document.createElement('span');
+            close.className = 'img-modal-close';
+            close.setAttribute('aria-label', 'Close');
+            close.innerHTML = '&times;';
+            modal.appendChild(close);
+            modal.appendChild(big);
+            document.body.appendChild(modal);
+            function hide(){ modal.classList.remove('open'); modal.setAttribute('aria-hidden', 'true'); big.setAttribute('src', ''); }
+            modal.addEventListener('click', hide);   // click anywhere (image / backdrop / close) dismisses
+            document.addEventListener('keydown', function(e){ if(e.key === 'Escape') hide(); });
+            return function(src, alt){
+                big.setAttribute('src', src);
+                big.setAttribute('alt', alt || '');
+                modal.classList.add('open');
+                modal.setAttribute('aria-hidden', 'false');
+            };
+        }
+
+        (function enhanceMedia(){
+            const root = document.querySelector('main .markdown-body');
+            if(!root) return;
+            const VIDEO_EXT = ['mp4','webm','ogv','mov','m4v','mkv'];
+            const AUDIO_EXT = ['mp3','wav','m4a','flac','aac','ogg','oga'];
+            const openLightbox = setupLightbox();
+
+            function ytId(u){
+                try{
+                    const m = u.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/|v\/))([A-Za-z0-9_-]{6,})/);
+                    if(m) return m[1];
+                    const m2 = u.match(/[?&]v=([A-Za-z0-9_-]{6,})/);
+                    return m2 ? m2[1] : null;
+                }catch(e){ return null; }
+            }
+            function extOf(u){
+                const clean = u.split('#')[0].split('?')[0];
+                const dot = clean.lastIndexOf('.');
+                return dot < 0 ? '' : clean.slice(dot + 1).toLowerCase();
+            }
+            // Is `node` the sole content of its own paragraph (its own line)?
+            function standaloneBlock(node){
+                const p = node.closest('p');
+                if(!p) return null;
+                const others = Array.prototype.slice.call(p.children).filter(function(c){ return c !== node; });
+                if(others.length) return null;
+                const txt = p.textContent.replace(node.textContent || '', '').trim();
+                return txt ? null : p;
+            }
+            function ytEmbed(id){
+                const wrap = document.createElement('div');
+                wrap.className = 'video-embed';
+                const ifr = document.createElement('iframe');
+                ifr.setAttribute('src', 'https://www.youtube.com/embed/' + id);
+                ifr.setAttribute('title', 'YouTube video');
+                ifr.setAttribute('allow', 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture');
+                ifr.setAttribute('allowfullscreen', '');
+                ifr.setAttribute('loading', 'lazy');
+                wrap.appendChild(ifr);
+                return wrap;
+            }
+            function player(tag, src){
+                const el = document.createElement(tag);
+                el.setAttribute('controls', '');
+                el.setAttribute('preload', 'metadata');
+                el.setAttribute('src', src);
+                return el;
+            }
+            function mediaFor(url){
+                const id = ytId(url);
+                if(id) return ytEmbed(id);
+                const ext = extOf(url);
+                if(VIDEO_EXT.indexOf(ext) >= 0) return player('video', url);
+                if(AUDIO_EXT.indexOf(ext) >= 0) return player('audio', url);
+                return null;
+            }
+
+            // Links: embed only when the link is standalone on its own line (keep inline
+            // references as plain links so prose is not broken).
+            Array.prototype.slice.call(root.querySelectorAll('a[href]')).forEach(function(a){
+                const made = mediaFor(a.getAttribute('href') || '');
+                if(!made) return;
+                const block = standaloneBlock(a);
+                if(block) block.parentNode.replaceChild(made, block);
+            });
+
+            // Images: media-by-image-syntax becomes a player/embed; a real image gets
+            // lazy-loading and a click-to-enlarge wrapper.
+            Array.prototype.slice.call(root.querySelectorAll('img[src]')).forEach(function(img){
+                if(!img.parentNode) return;
+                const src = img.getAttribute('src') || '';
+                const made = mediaFor(src);
+                if(made){
+                    const block = standaloneBlock(img);
+                    if(block) block.parentNode.replaceChild(made, block);
+                    else img.parentNode.replaceChild(made, img);
+                    return;
+                }
+                img.setAttribute('loading', 'lazy');
+                if(!img.closest('a')){   // don't hijack images the author already linked
+                    img.classList.add('img-zoom');
+                    img.addEventListener('click', function(){ openLightbox(img.src, img.alt); });
+                }
+            });
+        })();
+
         // Folder expand/collapse toggle
         document.querySelectorAll('.folder-toggle').forEach((toggle) => {
             toggle.addEventListener('click', () => {
@@ -869,21 +1004,29 @@ generate_admin_ui() {
  .msg{padding:8px 12px;border-radius:6px;margin:12px 0;display:none;}
  .ok{background:#1a3a1a;color:#3fb950;} .err{background:#3a1a1a;color:#f85149;}
  .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin-bottom:16px;}
+ .hint{background:#0d1117;border:1px solid #21262d;border-left:3px solid #58a6ff;border-radius:6px;padding:10px 12px;margin:10px 0 0;font-size:12px;color:#8b949e;line-height:1.6;}
+ .hint code{background:#161b22;border:1px solid #30363d;border-radius:4px;padding:1px 5px;font-size:11px;color:#c9d1d9;}
 </style></head><body>
 <h1>&#128221; Markdown Server &mdash; Admin</h1>
 <p><a href="/">&larr; back to site</a> &nbsp;|&nbsp; max folder depth: <b>__MAX_DEPTH__</b></p>
 <div id="msg" class="msg"></div>
 
 <div class="card"><h2>Upload files</h2>
- <input type="file" id="up" multiple>
+ <input type="file" id="up" multiple accept=".md,.markdown,.png,.jpg,.jpeg,.gif,.webp,.svg,.bmp,.ico,.avif,.mp4,.webm,.ogv,.mov,.m4v,.mkv,.mp3,.wav,.m4a,.flac,.aac,.ogg,.oga">
  <input type="text" id="upDir" placeholder="target folder (blank = root)">
- <button onclick="uploadFiles()">Upload</button></div>
+ <button onclick="uploadFiles()">Upload</button>
+ <div class="hint">
+  <b>Pages &amp; media together.</b> Select one or many files (the browser allows multi-select; the picker is filtered to supported types) and upload your <code>.md</code> page <i>and</i> its images / videos / audio into the <b>same target folder</b>.<br>
+  In the markdown, point at media by <b>relative path</b> — <code>![alt](diagram.png)</code> — or paste a full <b>URL</b>.<br>
+  Put a <b>video</b>, <b>audio</b>, or <b>YouTube</b> link on <b>its own line</b> and it auto-embeds a player: <code>![](clip.mp4)</code>, <code>![](song.mp3)</code>, <code>[watch](https://youtu.be/ID)</code>. Images are click-to-enlarge. (Raw <code>&lt;video&gt;</code> / <code>&lt;iframe&gt;</code> HTML also works.)
+ </div></div>
 
 <div class="card"><h2>New / edit markdown</h2>
  <input type="text" id="path" placeholder="path e.g. notes/page.md"><br><br>
  <textarea id="content" placeholder="# Markdown content..."></textarea><br>
  <button onclick="saveFile()">Save</button>
- <button onclick="document.getElementById('content').value='';document.getElementById('path').value='';">Clear</button></div>
+ <button onclick="document.getElementById('content').value='';document.getElementById('path').value='';">Clear</button>
+ <div class="hint">Embed media by putting it on its own line: <code>![](diagram.png)</code> (image), <code>![](clip.mp4)</code> (video), <code>![](song.mp3)</code> (audio), <code>[watch](https://youtu.be/ID)</code> (YouTube). Local files resolve relative to this page's folder.</div></div>
 
 <div class="card"><h2>New folder</h2>
  <input type="text" id="newdir" placeholder="folder path e.g. notes/sub">
@@ -1063,6 +1206,9 @@ This is the index.md file, which will always be at the top of the navigation sid
 - Create a new or copy your .md file into \`/opt/caddy-markdown/srv\` directory
 - Save the file, then refresh the page
 
+## Images & media
+- Embed an image, video, audio file, or YouTube link by pointing the markdown at a relative path or URL — see the **[Images & Media](images-and-media.md)** page for syntax
+
 ## Ordering the sidebar
 - By default each folder lists \`index.md\` (and \`README.md\`) first, then everything else alphabetically
 - To set a custom order, open the **/admin** page, use the **Organize sidebar order** card, pick a folder, reorder its pages and subfolders with the ▲/▼ buttons, and **Save order**
@@ -1084,6 +1230,7 @@ You can organize markdown files into subdirectories for better structure:
 | First Topic   | [link](01-first-topic.md)   | Introduction to the docs   |
 | Copy Test   | [link](Copy-test.md)   | Discover the copy feature   |
 | Next Topic   | [link](next-topic-with-a-long-name.md)   | Testing long file names   |
+| Images & Media   | [link](images-and-media.md)   | Embedding images, video, audio, YouTube   |
 | Tutorial: Getting Started   | [link](tutorials/getting-started.md)   | A page inside a folder   |
 
 EOF
@@ -1136,6 +1283,50 @@ This is another page inside the \`tutorials/\` folder, demonstrating that multip
 - Prefix file names with numbers to control sort order (e.g. \`01-setup.md\`, \`02-usage.md\`)
 - Dashes in file names are displayed as spaces in the sidebar
 - The sidebar can be resized by dragging its right edge, or collapsed entirely with the ☰ button (top-left) — handy on mobile
+
+[Back to Home](/)
+EOF
+
+    # A tiny text-based image so the media demo shows a real local picture offline.
+    cat > "$SRV_DIR/media-sample.svg" <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="200" viewBox="0 0 480 200">
+  <rect width="480" height="200" rx="12" fill="#161b22" stroke="#30363d"/>
+  <circle cx="92" cy="100" r="48" fill="#58a6ff"/>
+  <text x="170" y="96" fill="#c9d1d9" font-family="sans-serif" font-size="24">Sample image</text>
+  <text x="170" y="126" fill="#8b949e" font-family="sans-serif" font-size="14">served locally from /srv</text>
+</svg>
+EOF
+
+    cat > "$SRV_DIR/images-and-media.md" <<EOF
+# Images & Media
+
+Point a page at media by **relative path** (a file uploaded next to this page) or a full **URL**.
+Put each reference on **its own line** so it renders as a block.
+
+## Image — local file
+![Sample image](media-sample.svg)
+
+Click the image to enlarge it in a modal (click the backdrop or press Esc to close).
+
+## Image — remote URL
+\`![alt text](https://your-host/picture.png)\`
+
+## Video file
+\`![](clip.mp4)\` on its own line renders a video player. Supported: mp4, webm, ogv, mov, m4v, mkv.
+
+## Audio file
+\`![](song.mp3)\` renders an audio player. Supported: mp3, wav, m4a, flac, aac, ogg, oga.
+
+## YouTube
+A YouTube link on its own line becomes an embedded, responsive player:
+
+\`[watch](https://youtu.be/VIDEO_ID)\`
+
+## How it works
+- Upload your \`.md\` page **and** its media into the **same folder** from the **/admin** page (multi-select supported).
+- Local media is served straight from \`/srv\`; relative paths resolve against this page's folder.
+- Inline links (mid-sentence) stay as links — only references on their own line auto-embed.
+- Power users can also write raw \`<video>\` or \`<iframe>\` HTML directly in the markdown.
 
 [Back to Home](/)
 EOF
