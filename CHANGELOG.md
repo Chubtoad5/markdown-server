@@ -1,5 +1,22 @@
 # Changelog — markdown-server
 
+## 1.4.2 — Nested-folder depth shading (feature/nest-depth-shading)
+
+Make the folder hierarchy in the sidebar easier to scan, on top of the existing
+indent + ▶ arrow.
+
+### Added
+- Each nested `.folder-contents` gets a left guide line (`border-left`) and a faint
+  translucent tint (`--nest-shade`, `rgba(139,148,158,0.05)`). Because nested levels
+  paint over their parent, the tint **compounds with depth** — deeper folders read as
+  progressively shaded — with no per-level rules, so it scales to any nesting depth.
+- Subtle hover affordance: the guide line brightens when hovering a folder's contents.
+
+### Unchanged
+- CSS-only change in `generate_layout()`. Indentation, the expand/collapse arrow, the
+  navtree, ordering (`.order`), auth/TLS, the agent API, and the admin UI are all untouched.
+  No backend / Caddyfile / Dockerfile / compose changes.
+
 ## 1.4.1 — Fix: Organize card listed the folder itself (fix/organize-self-entry)
 
 Bugfix for the v1.4.0 "Organize sidebar order" card. The WebDAV `PROPFIND` hrefs come
