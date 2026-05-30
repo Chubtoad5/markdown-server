@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.4.0"
 IPP_URL="https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh"
 
 ### ---- USER DEFINED VARIABLES (all runtime-overridable: sudo VAR=value ./install-md) ----
@@ -608,28 +608,55 @@ generate_layout() {
 
 {{ define "navtree" }}
   {{ \$dir := .dir }}{{ \$depth := .depth }}{{ \$max := .max }}{{ \$req := .req }}
-  {{/* markdown files directly in this directory (sorted) */}}
-  {{ \$files := list }}
+  {{/* displayable direct children: .md files (not the root index.md) + dotless subfolders */}}
+  {{ \$entries := list }}
   {{ range listFiles \$dir }}
     {{ if and (hasSuffix ".md" .) (not (and (eq \$dir "/") (eq . "index.md"))) }}
-      {{ \$files = append \$files . }}
+      {{ \$entries = append \$entries . }}
+    {{ else if and (not (hasPrefix "." .)) (not (contains "." .)) }}
+      {{ \$entries = append \$entries . }}
     {{ end }}
   {{ end }}
-  {{ range sortAlpha \$files }}
-    {{ \$href := printf "%s/%s" (trimSuffix "/" \$dir) . }}
-    <li><a href="{{ \$href }}" class="{{ if eq \$req \$href }}active{{ end }}">{{ . | trimSuffix ".md" | replace "-" " " }}</a></li>
-  {{ end }}
-  {{/* subdirectories: dotless names only (files have extensions) */}}
-  {{ \$dirs := list }}
-  {{ range listFiles \$dir }}
-    {{ if and (not (hasPrefix "." .)) (not (contains "." .)) }}
-      {{ \$dirs = append \$dirs . }}
+  {{/* optional per-folder .order manifest (one child name per line); hidden dotfile,
+       written by the /admin Organize card via WebDAV. Guarded so a missing file
+       never aborts the render. */}}
+  {{ \$rel := trimPrefix "/" \$dir }}
+  {{ \$orderPath := ".order" }}
+  {{ if ne \$rel "" }}{{ \$orderPath = printf "%s/.order" \$rel }}{{ end }}
+  {{ \$manifest := list }}
+  {{ if has ".order" (listFiles \$dir) }}
+    {{ range splitList "\n" (readFile \$orderPath) }}
+      {{ \$line := trim . }}
+      {{ if ne \$line "" }}{{ \$manifest = append \$manifest \$line }}{{ end }}
     {{ end }}
   {{ end }}
-  {{ if \$dirs }}
-    {{ if lt \$depth \$max }}
-      {{ range sortAlpha \$dirs }}
-        {{ \$child := printf "%s/%s" (trimSuffix "/" \$dir) . }}
+  {{/* manifest entries first (still on disk, de-duped, in order), then anything new
+       alpha-sorted at the bottom. No manifest -> index.md / README.md pinned to top. */}}
+  {{ \$ordered := list }}
+  {{ range \$manifest }}
+    {{ if and (has . \$entries) (not (has . \$ordered)) }}{{ \$ordered = append \$ordered . }}{{ end }}
+  {{ end }}
+  {{ \$leftovers := list }}
+  {{ range \$entries }}
+    {{ if not (has . \$ordered) }}{{ \$leftovers = append \$leftovers . }}{{ end }}
+  {{ end }}
+  {{ \$leftovers = sortAlpha \$leftovers }}
+  {{ if not \$manifest }}
+    {{ \$pinned := list }}
+    {{ if has "index.md" \$leftovers }}{{ \$pinned = append \$pinned "index.md" }}{{ end }}
+    {{ if has "README.md" \$leftovers }}{{ \$pinned = append \$pinned "README.md" }}{{ end }}
+    {{ \$rest := list }}
+    {{ range \$leftovers }}{{ if not (has . \$pinned) }}{{ \$rest = append \$rest . }}{{ end }}{{ end }}
+    {{ \$leftovers = concat \$pinned \$rest }}
+  {{ end }}
+  {{ \$final := concat \$ordered \$leftovers }}
+  {{ range \$final }}
+    {{ if hasSuffix ".md" . }}
+      {{ \$href := printf "%s/%s" (trimSuffix "/" \$dir) . }}
+      <li><a href="{{ \$href }}" class="{{ if eq \$req \$href }}active{{ end }}">{{ . | trimSuffix ".md" | replace "-" " " }}</a></li>
+    {{ else }}
+      {{ \$child := printf "%s/%s" (trimSuffix "/" \$dir) . }}
+      {{ if lt \$depth \$max }}
         {{ \$open := hasPrefix (printf "%s/" \$child) \$req }}
         <li class="folder{{ if \$open }} expanded{{ end }}">
           <div class="folder-toggle">{{ . | replace "-" " " }}</div>
@@ -637,9 +664,9 @@ generate_layout() {
             {{ template "navtree" (dict "dir" \$child "depth" (add \$depth 1) "max" \$max "req" \$req) }}
           </ul>
         </li>
+      {{ else }}
+        <li><span class="depth-limit">&#9888; {{ . | replace "-" " " }} (nested beyond {{ \$max }} levels) not shown</span></li>
       {{ end }}
-    {{ else }}
-      <li><span class="depth-limit">&#9888; {{ len \$dirs }} nested folder(s) beyond {{ \$max }} levels not shown</span></li>
     {{ end }}
   {{ end }}
 {{ end }}
@@ -849,6 +876,13 @@ generate_admin_ui() {
  <input type="text" id="newdir" placeholder="folder path e.g. notes/sub">
  <button onclick="makeDir()">Create folder</button></div>
 
+<div class="card"><h2>Organize sidebar order</h2>
+ <p style="color:#8b949e;font-size:12px;margin:0 0 10px">Reorder the pages &amp; folders shown in the left navigation sidebar, one folder at a time. New items always start at the bottom until you order them. Affects the sidebar only.</p>
+ <input type="text" id="orderDir" placeholder="folder path (blank = root)">
+ <button onclick="loadOrder()">Load</button>
+ <div id="orderList" style="margin:12px 0"></div>
+ <button onclick="saveOrder()" id="orderSave" style="display:none">Save order</button></div>
+
 <div class="card"><h2>Files <button onclick="loadFiles()">&#8635; refresh</button></h2>
  <table id="files"><tbody></tbody></table></div>
 
@@ -907,6 +941,91 @@ async function makeDir(){
   const r = await fetch(davUrl(p)+'/', {method:'MKCOL'});
   if(r.ok){ show('Created folder '+p, true); loadFiles(); } else { show('Mkdir failed ('+r.status+') — parent folders must exist first', false); }
 }
+
+// ---- Organize sidebar order (per-folder .order manifest) ----
+let orderFolder = '';   // relative folder path being edited ('' = root)
+let orderItems = [];    // [{name, isDir}] in current (editable) order
+function escapeHtml(s){ return s.replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function byteCmp(a,b){ return a<b?-1:a>b?1:0; }   // mirror the server's sortAlpha (byte order)
+async function loadOrder(){
+  const f = document.getElementById('orderDir').value.trim().replace(/^\/+|\/+$/g,'');
+  if(f && folderDepth(f) > MAX_DEPTH){ show('Folder too deep (max '+MAX_DEPTH+' levels)', false); return; }
+  // 1. List direct children via WebDAV PROPFIND (Depth 1).
+  const url = davUrl(f ? f+'/' : '');
+  let resp;
+  try{ resp = await fetch(url, {method:'PROPFIND', headers:{'Depth':'1'}}); }
+  catch(e){ show('Could not list folder: '+e, false); return; }
+  if(!resp.ok){ show('Could not list '+(f||'(root)')+' ('+resp.status+')', false); return; }
+  const xml = new DOMParser().parseFromString(await resp.text(), 'application/xml');
+  const selfPath = new URL(url, location.href).pathname.replace(/\/+$/,'');
+  const items = [];
+  for(const r of xml.getElementsByTagNameNS('DAV:','response')){
+    const hrefEl = r.getElementsByTagNameNS('DAV:','href')[0];
+    if(!hrefEl) continue;
+    const hp = decodeURIComponent(hrefEl.textContent.trim()).replace(/\/+$/,'');
+    if(hp === selfPath) continue;                       // the folder itself
+    const name = hp.split('/').pop();
+    if(!name || name.startsWith('.')) continue;          // dotfiles (.order, .admin.html, ...)
+    const isDir = r.getElementsByTagNameNS('DAV:','collection').length > 0;
+    if(isDir){ if(name.indexOf('.') >= 0) continue; }     // sidebar shows dotless folders only
+    else { if(!name.endsWith('.md')) continue; }          // and .md files
+    if(f === '' && name === 'index.md') continue;         // root index.md is the fixed "Home" link
+    items.push({name, isDir});
+  }
+  // 2. Merge with any existing .order, mirroring the server's render rule.
+  let manifest = [];
+  try{
+    const mr = await fetch('/raw/' + (f ? f+'/' : '') + '.order', {cache:'no-store'});
+    if(mr.ok){ manifest = (await mr.text()).split('\n').map(s=>s.trim()).filter(Boolean); }
+  }catch(e){}
+  const byName = new Map(items.map(it=>[it.name, it]));
+  const seen = new Set();
+  const ordered = [];
+  for(const n of manifest){ if(byName.has(n) && !seen.has(n)){ ordered.push(byName.get(n)); seen.add(n); } }
+  let leftovers = items.filter(it=>!seen.has(it.name)).sort((a,b)=>byteCmp(a.name,b.name));
+  if(manifest.length === 0){    // no manifest: pin index.md / README.md to the top
+    const pinned = [];
+    for(const pn of ['index.md','README.md']){
+      const i = leftovers.findIndex(it=>it.name===pn);
+      if(i >= 0){ pinned.push(leftovers[i]); leftovers.splice(i,1); }
+    }
+    leftovers = pinned.concat(leftovers);
+  }
+  orderItems = ordered.concat(leftovers);
+  orderFolder = f;
+  renderOrder();
+}
+function renderOrder(){
+  const box = document.getElementById('orderList');
+  const saveBtn = document.getElementById('orderSave');
+  if(!orderItems.length){
+    box.innerHTML = '<p style="color:#8b949e">No orderable pages or folders in '+escapeHtml(orderFolder||'(root)')+'.</p>';
+    saveBtn.style.display = 'none';
+    return;
+  }
+  box.innerHTML = orderItems.map((it,i)=>
+    '<div style="display:flex;align-items:center;gap:6px;padding:3px 0;border-bottom:1px solid #21262d">'
+    +'<button onclick="moveOrder('+i+',-1)"'+(i===0?' disabled':'')+'>&#9650;</button>'
+    +'<button onclick="moveOrder('+i+',1)"'+(i===orderItems.length-1?' disabled':'')+'>&#9660;</button>'
+    +'<span>'+(it.isDir?'&#128193; ':'&#128196; ')+escapeHtml(it.name)+'</span></div>'
+  ).join('');
+  saveBtn.style.display = 'inline-block';
+}
+function moveOrder(i, d){
+  const j = i + d;
+  if(j < 0 || j >= orderItems.length) return;
+  const t = orderItems[i]; orderItems[i] = orderItems[j]; orderItems[j] = t;
+  renderOrder();
+}
+async function saveOrder(){
+  if(!orderItems.length){ show('Nothing to save', false); return; }
+  const body = orderItems.map(it=>it.name).join('\n') + '\n';
+  const path = (orderFolder ? orderFolder+'/' : '') + '.order';
+  const r = await fetch(davUrl(path), {method:'PUT', body});
+  if(r.ok){ show('Saved order for '+(orderFolder||'(root)')+' — reload the site to see it', true); }
+  else { show('Save order failed ('+r.status+')', false); }
+}
+
 loadFiles();
 </script></body></html>
 ADMINEOF
@@ -920,12 +1039,16 @@ This is the index.md file, which will always be at the top of the navigation sid
 
 ## How to add Markdown pages to this site
 - Generate a markdown (.md) file
-- Files will be sorted alpha numericly based on file namne on the navigation page
-- Use number prefixes to sort, i.e. "01-first-file.md, 02-second-file.md, etc..."
 - Use valid markdown formatting
 - Login to this host
 - Create a new or copy your .md file into \`/opt/caddy-markdown/srv\` directory
 - Save the file, then refresh the page
+
+## Ordering the sidebar
+- By default each folder lists \`index.md\` (and \`README.md\`) first, then everything else alphabetically
+- To set a custom order, open the **/admin** page, use the **Organize sidebar order** card, pick a folder, reorder its pages and subfolders with the ▲/▼ buttons, and **Save order**
+- New pages and folders always appear at the bottom of the list until you order them
+- Ordering is saved as a hidden \`.order\` file in each folder; you can also hand-edit it on this host (one entry name per line). A leading number in a file name still sorts naturally if you prefer that style
 
 ## Folder Hierarchy
 You can organize markdown files into subdirectories for better structure:
@@ -934,7 +1057,7 @@ You can organize markdown files into subdirectories for better structure:
 - Folders appear in the sidebar and can be expanded or collapsed by clicking on them
 - The sidebar is resizable by dragging its right edge
 - Click the ☰ button (top-left) to collapse the sidebar entirely for a full-width view; on phones the sidebar starts collapsed and slides in as a drawer
-- Root-level \`.md\` files continue to appear as a flat list above any folders
+- Pages and folders share one ordered list per directory, so a folder can sit between two pages (see "Ordering the sidebar" above)
 
 ## Table For Reference
 | Topic | Link | Note |
@@ -948,7 +1071,7 @@ EOF
 
     cat > "$SRV_DIR/01-first-topic.md" <<EOF
 # First Topic
-Markdown files are sorted alphabetically in the sidebar. You can prefix file names with numbers to control the order.
+By default the sidebar lists \`index.md\`/\`README.md\` first, then the rest alphabetically. Use the **Organize sidebar order** card on the **/admin** page to set a custom order per folder; new pages start at the bottom.
 Here is a sample link:
 [To the next topic](Copy-test.md)
 [Back to Home](/)

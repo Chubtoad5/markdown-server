@@ -24,8 +24,9 @@ Serve a directory of Markdown files as a browsable website, using Caddy in Docke
 - **Live rendering** — drop `.md` files into the content directory; refresh, no restart.
 - **Folder sidebar** — nested folders (collapsible) up to a configurable depth, with a clear guardrail notice when content is nested deeper.
 - **Collapsible sidebar** — toggle the left navigation in/out for a full-width reading view; auto-collapsed on phones and slides in as a drawer when needed.
+- **Custom sidebar order** — reorder pages and folders per directory from the `/admin` UI (▲/▼ buttons); new content lands at the bottom. Saved as a hidden `.order` file; no manifest means `index.md`/`README.md` first, then alphabetical.
 - **Agent-friendly API** — raw markdown at `/raw/<path>.md` (or `?raw=1`), a live JSON index at `/api/files.json`, and an `/llms.txt` hint.
-- **Upload / manage UI** — `/admin`: upload, create, edit, delete, and make folders. Backed by WebDAV (`/dav/`), which AI agents can also use to write files.
+- **Upload / manage UI** — `/admin`: upload, create, edit, delete, make folders, and **organize sidebar order**. Backed by WebDAV (`/dav/`), which AI agents can also use to write files.
 - **Auth** — HTTP basic auth by default; or none; or `forward_auth` to an external IdP.
 - **TLS** — none (HTTP), Caddy self-signed (`internal`), or Let's Encrypt (`auto`).
 - **Air-gap** — `save` builds a self-contained bundle (image + Docker packages); offline install needs no internet. Front-end CSS/JS are vendored and **baked into the image**, so it renders fully offline with no CDN.
@@ -117,7 +118,11 @@ The image is pushed as `<host:port>/<REGISTRY_NS>/markdown-caddy:<CADDY_VERSION>
   ```
 - **On the host:** copy `.md` files into `/opt/caddy-markdown/srv` (and subdirectories), then refresh.
 
-Files sort alphabetically; prefix with numbers (`01-intro.md`) to control order. Dashes in names render as spaces. Folder names should not contain dots.
+### Sidebar order
+
+Each folder lists `index.md`/`README.md` first, then everything else alphabetically. To set a custom order, open `/admin` → **Organize sidebar order**, pick a folder, reorder its pages and subfolders with the ▲/▼ buttons, and **Save order**. Pages and folders share one list, so a folder can sit between two pages. Newly added content always appears at the bottom until you order it.
+
+Order is stored as a hidden per-folder `.order` file (one entry name per line) written via WebDAV — you can also hand-edit it on the host, e.g. `curl -u admin:changeme -T .order http://<host>/dav/notes/.order`. This affects the navigation sidebar only; `/api/files.json` and `/llms.txt` stay alphabetical. A leading number in a file name still sorts naturally if you prefer that. Dashes in names render as spaces; folder names should not contain dots.
 
 ## Reading content programmatically (AI agents)
 
