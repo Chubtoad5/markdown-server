@@ -1,5 +1,35 @@
 # Changelog — markdown-server
 
+## 1.4.0 — Custom sidebar order (feature/sidebar-ordering)
+
+Let an editor arrange the left-sidebar navigation per folder instead of being stuck with
+strict alphabetical order. Motivated by folders like `home-lab` rendering *hardware, index,
+network, proxmox cluster, services* — hard to scan, with `index.md` buried in the middle.
+
+### Added
+- **Per-folder `.order` manifest** — a hidden, newline-delimited list of child names that
+  fixes the sidebar order for that folder. Read by the `navtree` template at render time
+  (guarded so a missing/empty file never breaks the page). Stays out of the sidebar, the
+  `/admin` file list, and `/api/files.json` (all already skip dotfiles). No new routes.
+- **/admin → "Organize sidebar order" card** — pick a folder, list its pages and subfolders
+  (via WebDAV `PROPFIND` Depth 1), reorder with ▲/▼ buttons, and **Save order** (writes
+  `.order` through the existing auth-gated `/dav/` handler). Folder labels are HTML-escaped.
+- **Combined ordered list** — files and subfolders share one ordered list per directory, so a
+  folder can sit between two pages (previously: all files, then all folders).
+- **Sensible default** — with no `.order`, `index.md`/`README.md` are pinned to the top, then
+  the rest alphabetically. New pages/folders always fall to the bottom until ordered.
+
+### Changed
+- `SCRIPT_VERSION` → `1.4.0` (was stale at `1.2.0`; 1.3.0 only bumped docs).
+- Demo `index.md` + README document the Organize workflow; the old "files sort alphabetically,
+  use number prefixes" guidance is reframed (numeric prefixes still sort, as a fallback).
+
+### Unchanged
+- File/folder labels (dashes → spaces, numbers kept — no prefix stripping), depth-limit
+  guardrail, collapse/drag-resize, folder expand/collapse, auth/TLS, the agent API
+  (`/api/files.json`, `/raw/<path>.md`, `/llms.txt` stay alphabetical), and the WebDAV admin
+  UI. No backend, compose, Dockerfile, or Caddyfile changes.
+
 ## 1.3.0 — Collapsible sidebar (feature/collapsible-sidebar)
 
 Make the left navigation sidebar collapsible so the markdown view can use the full
