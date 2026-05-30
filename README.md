@@ -25,6 +25,7 @@ Serve a directory of Markdown files as a browsable website, using Caddy in Docke
 - **Folder sidebar** — nested folders (collapsible) up to a configurable depth, with a clear guardrail notice when content is nested deeper.
 - **Collapsible sidebar** — toggle the left navigation in/out for a full-width reading view; auto-collapsed on phones and slides in as a drawer when needed.
 - **Custom sidebar order** — reorder pages and folders per directory from the `/admin` UI (▲/▼ buttons); new content lands at the bottom. Saved as a hidden `.order` file; no manifest means `index.md`/`README.md` first, then alphabetical.
+- **Images & media** — embed images (local or URL), video/audio files, and YouTube links by pointing markdown at a path or URL; auto-rendered as responsive players/embeds. Images are click-to-enlarge.
 - **Agent-friendly API** — raw markdown at `/raw/<path>.md` (or `?raw=1`), a live JSON index at `/api/files.json`, and an `/llms.txt` hint.
 - **Upload / manage UI** — `/admin`: upload, create, edit, delete, make folders, and **organize sidebar order**. Backed by WebDAV (`/dav/`), which AI agents can also use to write files.
 - **Auth** — HTTP basic auth by default; or none; or `forward_auth` to an external IdP.
@@ -123,6 +124,19 @@ The image is pushed as `<host:port>/<REGISTRY_NS>/markdown-caddy:<CADDY_VERSION>
 Each folder lists `index.md`/`README.md` first, then everything else alphabetically. To set a custom order, open `/admin` → **Organize sidebar order**, pick a folder, reorder its pages and subfolders with the ▲/▼ buttons, and **Save order**. Pages and folders share one list, so a folder can sit between two pages. Newly added content always appears at the bottom until you order it.
 
 Order is stored as a hidden per-folder `.order` file (one entry name per line) written via WebDAV — you can also hand-edit it on the host, e.g. `curl -u admin:changeme -T .order http://<host>/dav/notes/.order`. This affects the navigation sidebar only; `/api/files.json` and `/llms.txt` stay alphabetical. A leading number in a file name still sorts naturally if you prefer that. Dashes in names render as spaces; folder names should not contain dots.
+
+### Images & media
+
+Point a page at media by **relative path** (a file you uploaded next to the page) or a full **URL**. Put each reference on **its own line** so it renders as a block:
+
+```markdown
+![Diagram](diagram.png)                  # image — local file or URL
+![](clip.mp4)                            # video player (mp4, webm, ogv, mov, m4v, mkv)
+![](song.mp3)                            # audio player (mp3, wav, m4a, flac, aac, ogg, oga)
+[watch](https://youtu.be/VIDEO_ID)        # responsive YouTube embed
+```
+
+Upload the `.md` page **and** its media into the same folder from `/admin` (multi-select; the picker is filtered to supported types). Images are responsive and **click-to-enlarge**; inline (mid-sentence) media links stay as links — only references on their own line auto-embed. Power users can still write raw `<video>` / `<iframe>` HTML directly in the markdown. Media is served straight from `/srv`; only `.md` pages are indexed by `/api/files.json`.
 
 ## Reading content programmatically (AI agents)
 
