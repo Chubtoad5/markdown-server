@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.4.1"
+SCRIPT_VERSION="1.4.2"
 IPP_URL="https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh"
 
 ### ---- USER DEFINED VARIABLES (all runtime-overridable: sudo VAR=value ./install-md) ----
@@ -476,6 +476,10 @@ generate_layout() {
             --sidebar-border: #30363d;
             --link-color: #8b949e;
             --sidebar-width: 195px;
+            /* Faint per-level tint for nested folders; it compounds with depth
+               (each nested .folder-contents paints over its parent), so deeper
+               folders read as progressively shaded — see .folder-contents. */
+            --nest-shade: rgba(139, 148, 158, 0.05);
         }
 
         body {
@@ -556,7 +560,16 @@ generate_layout() {
             transition: transform 0.2s ease; flex-shrink: 0;
         }
         .folder.expanded > .folder-toggle::before { transform: rotate(90deg); }
-        .folder-contents { display: none; padding-left: 12px; }
+        /* Nested folders: a left guide line + a faint background tint that
+           compounds with each level (deeper = subtly more shaded) to make the
+           hierarchy easier to scan, on top of the existing indent + arrow. */
+        .folder-contents {
+            display: none; padding-left: 10px; margin-left: 6px;
+            border-left: 1px solid var(--sidebar-border);
+            background-color: var(--nest-shade);
+            border-radius: 0 6px 6px 0;
+        }
+        .folder-contents:hover { border-left-color: #484f58; }
         .folder.expanded > .folder-contents { display: block; }
 
         /* Resize handle */
