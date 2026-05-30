@@ -1,5 +1,20 @@
 # Changelog — markdown-server
 
+## 1.4.1 — Fix: Organize card listed the folder itself (fix/organize-self-entry)
+
+Bugfix for the v1.4.0 "Organize sidebar order" card. The WebDAV `PROPFIND` hrefs come
+back rooted at the WebDAV root **without** the `/dav` route prefix (the route strips it
+before `webdav`), so the self-entry filter — which compared against a `/dav/...` path —
+never matched. Result: loading a folder wrongly included **the folder itself** as an
+entry, making e.g. `elry` look like it contained a child `elry` (and inviting a 404 from
+trying to load `elry/elry`).
+
+### Fixed
+- Normalise each `PROPFIND` href (strip optional scheme/host and `/dav` prefix, trim
+  slashes) to a content-root-relative path, then skip the entry whose path equals the
+  requested folder. The folder itself is no longer listed; only real children appear.
+- Friendlier message when listing a non-existent folder (`folder not found` on 404).
+
 ## 1.4.0 — Custom sidebar order (feature/sidebar-ordering)
 
 Let an editor arrange the left-sidebar navigation per folder instead of being stuck with

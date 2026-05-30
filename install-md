@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.4.1"
 IPP_URL="https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh"
 
 ### ---- USER DEFINED VARIABLES (all runtime-overridable: sudo VAR=value ./install-md) ----
@@ -955,21 +955,27 @@ async function loadOrder(){
   let resp;
   try{ resp = await fetch(url, {method:'PROPFIND', headers:{'Depth':'1'}}); }
   catch(e){ show('Could not list folder: '+e, false); return; }
-  if(!resp.ok){ show('Could not list '+(f||'(root)')+' ('+resp.status+')', false); return; }
+  if(!resp.ok){ show('Could not list '+(f||'(root)')+(resp.status===404?' — folder not found':' ('+resp.status+')'), false); return; }
   const xml = new DOMParser().parseFromString(await resp.text(), 'application/xml');
-  const selfPath = new URL(url, location.href).pathname.replace(/\/+$/,'');
   const items = [];
   for(const r of xml.getElementsByTagNameNS('DAV:','response')){
     const hrefEl = r.getElementsByTagNameNS('DAV:','href')[0];
     if(!hrefEl) continue;
-    const hp = decodeURIComponent(hrefEl.textContent.trim()).replace(/\/+$/,'');
-    if(hp === selfPath) continue;                       // the folder itself
-    const name = hp.split('/').pop();
-    if(!name || name.startsWith('.')) continue;          // dotfiles (.order, .admin.html, ...)
+    // hrefs come back rooted at the WebDAV root WITHOUT the /dav route prefix (it is
+    // stripped before webdav), and may be absolute. Normalise to a path relative to the
+    // content root so we can reliably skip the self entry (PROPFIND Depth 1 returns the
+    // folder itself plus its direct children).
+    let rel = decodeURIComponent(hrefEl.textContent.trim())
+      .replace(/^https?:\/\/[^/]+/, '')   // drop scheme://host if absolute
+      .replace(/^\/dav(?=\/|$)/, '')       // drop optional /dav prefix
+      .replace(/^\/+|\/+$/g, '');          // trim leading/trailing slashes
+    if(rel === f) continue;                                // the folder itself
+    const name = rel.split('/').pop();
+    if(!name || name.startsWith('.')) continue;            // dotfiles (.order, .admin.html, ...)
     const isDir = r.getElementsByTagNameNS('DAV:','collection').length > 0;
-    if(isDir){ if(name.indexOf('.') >= 0) continue; }     // sidebar shows dotless folders only
-    else { if(!name.endsWith('.md')) continue; }          // and .md files
-    if(f === '' && name === 'index.md') continue;         // root index.md is the fixed "Home" link
+    if(isDir){ if(name.indexOf('.') >= 0) continue; }       // sidebar shows dotless folders only
+    else { if(!name.endsWith('.md')) continue; }            // and .md files
+    if(f === '' && name === 'index.md') continue;           // root index.md is the fixed "Home" link
     items.push({name, isDir});
   }
   // 2. Merge with any existing .order, mirroring the server's render rule.
