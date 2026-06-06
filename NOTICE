@@ -1,0 +1,21 @@
+Markdown Server
+Copyright (C) 2026 Chubtoad5
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This is an original automation script. It builds and serves a Caddy-based Markdown
+server, using the following third-party open-source software, each under its own
+license (all credit to their respective authors):
+
+  Caddy                   Apache-2.0   https://github.com/caddyserver/caddy
+  goldmark                MIT          https://github.com/yuin/goldmark
+  caddy-webdav            Apache-2.0   https://github.com/mholt/caddy-webdav
+  xcaddy (build tool)     Apache-2.0   https://github.com/caddyserver/xcaddy
+  Docker / Moby           Apache-2.0   https://github.com/moby/moby
+
+Optional integration: Authentik forward-auth (https://goauthentik.io/, MIT) when
+the server is placed behind that identity provider.
+
+The `save`/`push` modes redistribute a custom-built Caddy image (Caddy core +
+caddy-webdav module, both Apache-2.0). Retain their copyright/license notices and
+any bundled NOTICE files.
