@@ -159,3 +159,9 @@ sudo ./install-md install                 # detects the bundle, installs offline
 ## License
 
 See [LICENSE](LICENSE).
+
+## Upstream / Credits
+
+This project automates the following open-source software; all credit to their authors. See [NOTICE](NOTICE).
+
+- Caddy (Apache-2.0), goldmark (MIT), caddy-webdav (Apache-2.0), xcaddy (Apache-2.0), Docker (Apache-2.0)
