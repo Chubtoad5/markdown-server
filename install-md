@@ -1595,7 +1595,7 @@ do_status() {
 # Shape:  ./install-md [command] [push] [-registry <host:port> <user> <pass>]
 # The command is the first token unless it is a flag or `push` (then: install).
 # When sourced by a test harness, stop here: only the functions above are wanted.
-if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+if [[ "${BASH_SOURCE[0]:-$0}" != "$0" ]]; then
   return 0
 fi
 
