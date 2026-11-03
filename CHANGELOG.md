@@ -114,7 +114,7 @@ viewport width — especially useful on phones and other narrow screens.
 
 Push the custom image to an OCI registry (e.g. Harbor) or pull-and-run it from one,
 mirroring the `-registry`/`push` conventions of the sibling Chubtoad5 installers.
-Validated end-to-end on lab host 192.168.10.201 against a real Harbor (push, pull-and-run,
+Validated end-to-end on a lab host against a real Harbor (push, pull-and-run,
 `save push`, and an offline-bundle regression check).
 
 ### Added
@@ -144,7 +144,7 @@ Validated end-to-end on lab host 192.168.10.201 against a real Harbor (push, pul
 ## 1.1.0 — Portability, air-gap, agent API, and upload UI (feature/portability-and-features)
 
 A ground-up hardening and feature pass on `install-md`. Validated end-to-end on lab
-hosts 192.168.10.203 and 192.168.10.201 (including a real gateway-blocked air-gap run).
+hosts (including a real gateway-blocked air-gap run).
 
 ### Added
 - **CLI subcommands:** `install` / `save` / `uninstall` / `status` / `version` / `help`

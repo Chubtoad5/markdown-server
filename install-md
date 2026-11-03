@@ -1555,7 +1555,8 @@ built=$(date)
 os=${ID:-unknown} ${VERSION_ID:-}
 EOF
 
-    local out="$(pwd)/$OFFLINE_SENTINEL"
+    local out
+    out="$(pwd)/$OFFLINE_SENTINEL"
     echo "  Creating $out ..."
     tar czf "$out" -C "$stage" .
     rm -rf "$stage"
@@ -1593,6 +1594,11 @@ do_status() {
 ### ---- Argument parsing ----
 # Shape:  ./install-md [command] [push] [-registry <host:port> <user> <pass>]
 # The command is the first token unless it is a flag or `push` (then: install).
+# When sourced by a test harness, stop here: only the functions above are wanted.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 CMD="install"
 if [[ $# -gt 0 && "$1" != -* && "$1" != "push" ]]; then
     CMD="$1"; shift
