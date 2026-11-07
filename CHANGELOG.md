@@ -1,6 +1,6 @@
 # Changelog — markdown-server
 
-## 1.5.1 — 2026-11-07 — The air-gapped install starts Docker
+## v1.5.1 — 2026-11-07 — The air-gapped install starts Docker
 
 ### Fixed
 - **An air-gapped install on Rocky, Alma or RHEL starts Docker.** It installed Docker from the bundle, but only
