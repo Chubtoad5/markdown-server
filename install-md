@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.5.1"
 IPP_URL="https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh"
 
 ### ---- USER DEFINED VARIABLES (all runtime-overridable: sudo VAR=value ./install-md) ----
@@ -295,17 +295,50 @@ extract_offline_bundle() {
 ensure_docker_offline() {
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
         echo "  Docker and compose plugin present."
-        return 0
-    fi
-    echo "  Docker missing — installing from bundled offline packages..."
-    local off="$BASE_DIR/.offline"
-    if [[ -f "$off/offline-packages.tar.gz" && -x "$off/install_packages.sh" ]]; then
-        ( cd "$off" && ./install_packages.sh offline docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin )
     else
-        echo "Error: offline bundle has no Docker packages and Docker is not installed on this host." >&2
-        exit 1
+        echo "  Docker missing — installing from bundled offline packages..."
+        local off="$BASE_DIR/.offline"
+        if [[ -f "$off/offline-packages.tar.gz" && -x "$off/install_packages.sh" ]]; then
+            ( cd "$off" && ./install_packages.sh offline docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin )
+        else
+            echo "Error: offline bundle has no Docker packages and Docker is not installed on this host." >&2
+            exit 1
+        fi
+        command -v docker >/dev/null 2>&1 || { echo "Error: offline Docker install failed." >&2; exit 1; }
     fi
-    command -v docker >/dev/null 2>&1 || { echo "Error: offline Docker install failed." >&2; exit 1; }
+    # Ubuntu's package starts Docker, and the rpm packages don't. Online, images-pull-push starts it. Also on a re-run,
+    # after a first run that installed Docker but couldn't start it.
+    if systemctl cat docker.service >/dev/null 2>&1 && ! systemctl is-active --quiet docker; then
+        check_el_docker_modules_offline
+        echo "  Starting Docker..."
+        if ! systemctl enable --now docker; then
+            echo "Error: Docker is installed but won't start. See 'journalctl -u docker'." >&2
+            exit 1
+        fi
+    fi
+}
+
+# Rocky, Alma and RHEL 10 keep the module Docker needs for its NAT rules (xt_addrtype) in kernel-modules-extra, which
+# their cloud images leave out, so Docker can't start without it. Online, images-pull-push installs the running
+# kernel's package. Here nothing can be fetched, so it says what to do. Spec 11, U2.
+check_el_docker_modules_offline() {
+    case "${ID:-}" in rhel|centos|rocky|almalinux|fedora) ;; *) return 0 ;; esac
+    modprobe -n xt_addrtype >/dev/null 2>&1 && return 0
+    local kver dir newer=""
+    kver=$(uname -r)
+    for dir in "${MODULES_ROOT:-/lib/modules}"/*/; do
+        dir=${dir%/}
+        [[ "${dir##*/}" == "$kver" ]] && continue
+        if [[ -n "$(find "$dir" -name 'xt_addrtype.ko*' -print -quit 2>/dev/null)" ]]; then newer=${dir##*/}; fi
+    done
+    echo "Error: Docker needs the xt_addrtype kernel module, which the running kernel ($kver) doesn't have." >&2
+    if [[ -n "$newer" ]]; then
+        echo "  Kernel $newer, installed on this host, has it: reboot into it, then run this again." >&2
+    else
+        echo "  Install kernel-modules-extra-$kver from local media (dnf install kernel-modules-extra-$kver)," >&2
+        echo "  then run this again." >&2
+    fi
+    exit 1
 }
 
 load_offline_image() {

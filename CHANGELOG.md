@@ -1,5 +1,21 @@
 # Changelog — markdown-server
 
+## 1.5.1 — 2026-11-07 — The air-gapped install starts Docker
+
+### Fixed
+- **An air-gapped install on Rocky, Alma or RHEL starts Docker.** It installed Docker from the bundle, but only
+  Ubuntu's package starts Docker by itself, so the install then failed at its first `docker` command (`failed to
+  connect to the docker API`). It now enables and starts Docker whenever it's installed but not running, which also
+  covers a re-run after a failed start.
+- **On Rocky 10's cloud image, it says what Docker is missing.** That image leaves out `kernel-modules-extra`, which
+  holds the module Docker needs for its NAT rules (`xt_addrtype`), so Docker can't start, and the bundle can't carry
+  a package for a kernel it doesn't know. The install now stops before starting Docker, and names the package to
+  install from local media, `kernel-modules-extra-<running kernel>`, or the kernel on this host to reboot into, when
+  one has the module. Online installs were already fine: `images-pull-push` installs the running kernel's package.
+
+### Tests
+- `tests/unit/docker-offline.bats`: the missing-module messages, the start, and a Docker that won't start.
+
 ## 1.5.0 — Images & media in markdown (feature/media-embeds)
 
 Display images, video files, audio files, and YouTube links in pages by pointing the
