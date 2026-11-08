@@ -13,7 +13,7 @@ cp "$REPO/install-md" .; chmod +x install-md
 cp "$CI_HANDOFF/md-save.tar.gz" . && ok "put the bundle beside install-md" || { bad "put the bundle beside install-md"; echo "=== exit 1"; exit 1; }
 P=Test-Pass-1 B=http://127.0.0.1:8080
 export TCP_PORT=8080 MD_ADMIN_PASSWORD=$P
-./install-md install > "$W/o" 2>&1 && ok "install with no route out" || { bad "install with no route out"; tail -8 "$W/o" | cut -c1-170; }
+./install-md install > "$W/o" 2>&1 && ok "install with no route out" || { bad "install with no route out"; tail -8 "$W/o" | cut -c1-170; echo "  (the checks after it would only fail too)"; echo "=== exit 1"; exit 1; }
 up() { [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' "$B/")" = 200 ]; }
 within 60 up && ok "the site answers" || bad "the site doesn't answer"
 printf '# A1\n\nfrom the bundle\n' > page.md
