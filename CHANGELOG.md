@@ -1,5 +1,33 @@
 # Changelog — markdown-server
 
+## v1.6.0 — 2026-11-08 — The helpers come from releases
+
+### Changed
+- **`image_pull_push.sh` and `install_packages.sh` are fetched from releases, `images-pull-push` `v1.1.1` and
+  `install-packages` `v1.1.2`, instead of `main`** (spec 14, as spec 12 did for rke2 and SeaweedFS). So a merge in
+  either no longer reaches this installer until a pin moves.
+- **A copy already in `$BASE_DIR/utilities` is reused only if it came from the same ref,** recorded beside it in a `.ref`
+  file. Before, any copy was kept for good, so a host never saw a fix. A copy with no record is fetched again once.
+- **An install from the offline bundle never downloads a helper.** The bundle now carries both helpers and their `.ref`
+  records, so an offline install with a registry uses the bundle's `image_pull_push.sh`. An older bundle with no copy
+  stops and says what to do, before anything changes. A `save` always fetches the pinned copies.
+- **A registry install gets `image_pull_push.sh` before it stops the running site,** so a failed download leaves the site
+  up. A failed download's error names the `_URL` setting to point at a mirror.
+- **`INSTALL_PACKAGES_REF` is passed on to `image_pull_push.sh`,** which reads it, so one setting covers both helpers.
+
+### Added
+- **`IMAGE_PULL_PUSH_REF`** (default `v1.1.1`) and **`INSTALL_PACKAGES_REF`** (default `v1.1.2`).
+- **`IMAGE_PULL_PUSH_URL`** and **`INSTALL_PACKAGES_URL`**, which win over their refs. `IPP_URL`, fixed until now, works
+  as an alias for `IMAGE_PULL_PUSH_URL`.
+- **`IMAGE_PULL_PUSH_SHA256`** and **`INSTALL_PACKAGES_SHA256`**: optional checksums. A mismatch, or a failed download,
+  stops the run and leaves no file.
+
+### Tests
+- `tests/unit/helper-pins.bats`: both default tags, the ref and URL settings and the `IPP_URL` alias, the export, reuse
+  and refetch, both checksum cases, a failed download, the offline cases (a copy in place, the bundle's copy, an older
+  bundle with none), that `save` bundles both helpers and never sets the offline flag, and that a registry install gets
+  the helper before it stops the site.
+
 ## v1.5.1 — 2026-11-07 — The air-gapped install starts Docker
 
 ### Fixed
