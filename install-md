@@ -221,7 +221,7 @@ helper_check() {
     if [[ $MD_OFFLINE -eq 1 ]]; then
         [[ -s "$dest" ]] && return 0
         if [[ -s "$bundled" ]]; then
-            cp "$bundled" "$dest" && chmod +x "$dest"
+            cp "$bundled" "$dest" && chmod +x "$dest" || { echo "Error: couldn't copy the bundle's $1 into $BASE_DIR/utilities." >&2; exit 1; }
             [[ -f "$BASE_DIR/.offline/.$1.ref" ]] && cp "$BASE_DIR/.offline/.$1.ref" "$(dirname "$dest")/.$1.ref"
             return 0
         fi
