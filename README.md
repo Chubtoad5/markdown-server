@@ -107,6 +107,11 @@ The image is pushed as `<host:port>/<REGISTRY_NS>/markdown-caddy:<CADDY_VERSION>
 | `REGISTRY_NS` | `library` | Registry project/namespace for the pushed image |
 | `REGISTRY_INFO` | (empty) | Registry `host:port` (env-var alternative to `-registry`) |
 | `REG_USER` / `REG_PASS` | (empty) | Registry credentials (env-var alternative) |
+| `IMAGE_PULL_PUSH_REF` | `v1.1.1` | The `images-pull-push` release (a tag, branch or commit) whose `image_pull_push.sh` installs Docker and trusts a registry's certificate. A copy already in `$BASE_DIR/utilities` is reused only if it came from the same ref |
+| `IMAGE_PULL_PUSH_URL` (`IPP_URL`) | the ref's file on `raw.githubusercontent.com` | Full URL of `image_pull_push.sh`, for a mirror. Wins over the ref. `IPP_URL` is the older name |
+| `INSTALL_PACKAGES_REF` | `v1.1.2` | The `install-packages` release whose `install_packages.sh` `save` bundles for the offline Docker install. Passed on to `image_pull_push.sh` too, so one setting covers both helpers |
+| `INSTALL_PACKAGES_URL` | the ref's file on `raw.githubusercontent.com` | Full URL of `install_packages.sh`, for a mirror. Wins over the ref |
+| `IMAGE_PULL_PUSH_SHA256` / `INSTALL_PACKAGES_SHA256` | (empty) | Optional checksums. A mismatch, or a failed download, stops the run and leaves no file. An install from the offline bundle never downloads either helper |
 
 ## Adding content
 

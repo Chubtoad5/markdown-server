@@ -20,8 +20,18 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.5.1"
-IPP_URL="https://github.com/Chubtoad5/images-pull-push/raw/refs/heads/main/image_pull_push.sh"
+SCRIPT_VERSION="1.6.0"
+# Helper scripts come from releases, not main (spec 14, as spec 12 did for rke2 and SeaweedFS). A URL wins over its ref,
+# IPP_URL still works as an alias for IMAGE_PULL_PUSH_URL, and a checksum is optional.
+IMAGE_PULL_PUSH_REF="${IMAGE_PULL_PUSH_REF:-v1.1.1}"
+IMAGE_PULL_PUSH_URL="${IMAGE_PULL_PUSH_URL:-${IPP_URL:-https://raw.githubusercontent.com/Chubtoad5/images-pull-push/${IMAGE_PULL_PUSH_REF}/image_pull_push.sh}}"
+IMAGE_PULL_PUSH_SHA256="${IMAGE_PULL_PUSH_SHA256:-}"
+IPP_URL="$IMAGE_PULL_PUSH_URL"
+INSTALL_PACKAGES_REF="${INSTALL_PACKAGES_REF:-v1.1.2}"
+INSTALL_PACKAGES_URL="${INSTALL_PACKAGES_URL:-https://raw.githubusercontent.com/Chubtoad5/install-packages/${INSTALL_PACKAGES_REF}/install_packages.sh}"
+INSTALL_PACKAGES_SHA256="${INSTALL_PACKAGES_SHA256:-}"
+export INSTALL_PACKAGES_REF          # image_pull_push.sh reads it too, so one setting covers both helpers
+MD_OFFLINE=0                         # set by an install from the offline bundle: the helpers are never downloaded then
 
 ### ---- USER DEFINED VARIABLES (all runtime-overridable: sudo VAR=value ./install-md) ----
 BASE_DIR="${BASE_DIR:-/opt/caddy-markdown}"           # Install and data directory
@@ -177,14 +187,47 @@ port_in_use() {
     fi
 }
 
-# Download the shared images-pull-push helper once (used for Docker install,
-# registry-cert trust, etc.) so all callers reuse the same copy.
-ensure_ipp() {
-    mkdir -p "$BASE_DIR/utilities"
-    if [[ ! -x "$BASE_DIR/utilities/image_pull_push.sh" ]]; then
-        curl -sfL "$IPP_URL" -o "$BASE_DIR/utilities/image_pull_push.sh"
-        chmod +x "$BASE_DIR/utilities/image_pull_push.sh"
+# fetch_helper <dest> <url> <ref> [sha256]: a helper script at a given ref (spec 14, as Harbor does). A copy is reused
+# only when the .ref file beside it names the same ref; any other copy is fetched again. A failed download or a
+# checksum mismatch leaves no file behind.
+fetch_helper() {
+    local dest=$1 url=$2 ref=$3 sha=${4:-} ref_file
+    ref_file="$(dirname "$dest")/.$(basename "$dest").ref"
+    if [[ -s "$dest" && "$(cat "$ref_file" 2>/dev/null)" == "$ref" ]]; then
+        return 0
     fi
+    echo "  Downloading $(basename "$dest") ($ref)..."
+    if ! curl -fsSL "$url" -o "$dest.tmp"; then
+        rm -f "$dest.tmp"
+        echo "Error: failed to download $url" >&2
+        return 1
+    fi
+    if [[ -n "$sha" ]] && ! echo "$sha  $dest.tmp" | sha256sum -c --status; then
+        rm -f "$dest.tmp"
+        echo "Error: $(basename "$dest") from $url doesn't match its checksum." >&2
+        return 1
+    fi
+    mv "$dest.tmp" "$dest"
+    chmod +x "$dest"
+    printf '%s\n' "$ref" > "$ref_file"
+}
+
+# helper_check <file> <url> <ref> [sha256]: the helper in utilities/. An install from the offline bundle never
+# downloads it; a save always fetches the pinned copy.
+helper_check() {
+    local dest="$BASE_DIR/utilities/$1"
+    mkdir -p "$BASE_DIR/utilities"
+    if [[ $MD_OFFLINE -eq 1 ]]; then
+        [[ -s "$dest" ]] && return 0
+        echo "Error: installing from the offline bundle, and $1 isn't in $BASE_DIR/utilities. Nothing is downloaded offline." >&2
+        exit 1
+    fi
+    fetch_helper "$dest" "$2" "$3" "${4:-}" || { echo "Error: couldn't fetch $1 (check network access)." >&2; exit 1; }
+}
+
+# The shared images-pull-push helper (Docker install, registry-cert trust), so all callers reuse the same copy.
+ensure_ipp() {
+    helper_check image_pull_push.sh "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256"
 }
 
 ensure_docker() {
@@ -1435,6 +1478,7 @@ do_install() {
     local offline=false
     if is_offline; then
         offline=true
+        MD_OFFLINE=1
         echo "  Offline bundle ($OFFLINE_SENTINEL) detected — installing without internet."
         extract_offline_bundle
         ensure_docker_offline
@@ -1568,13 +1612,9 @@ do_save() {
     docker save "$(md_image)" | gzip > "$stage/image/$(image_tar)"
 
     echo "  Bundling Docker packages for offline install (install-packages save)..."
-    mkdir -p "$BASE_DIR/utilities"
-    if [[ ! -x "$BASE_DIR/utilities/install_packages.sh" ]]; then
-        curl -sfL "https://github.com/Chubtoad5/install-packages/raw/refs/heads/main/install_packages.sh" \
-            -o "$BASE_DIR/utilities/install_packages.sh"
-        chmod +x "$BASE_DIR/utilities/install_packages.sh"
-    fi
+    helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAGES_REF" "$INSTALL_PACKAGES_SHA256"
     cp "$BASE_DIR/utilities/install_packages.sh" "$stage/install_packages.sh"
+    cp "$BASE_DIR/utilities/.install_packages.sh.ref" "$stage/.install_packages.sh.ref"
     if ( cd "$stage" && ./install_packages.sh save docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ); then
         echo "  Docker packages bundled (offline-packages.tar.gz)."
     else
