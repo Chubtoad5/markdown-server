@@ -213,21 +213,31 @@ fetch_helper() {
 }
 
 # helper_check <file> <url> <ref> [sha256]: the helper in utilities/. An install from the offline bundle never
-# downloads it; a save always fetches the pinned copy.
+# downloads it: it uses a copy already there, or the bundle's own (v1.6.0+ bundles carry both helpers). A save always
+# fetches the pinned copy.
 helper_check() {
-    local dest="$BASE_DIR/utilities/$1"
+    local dest="$BASE_DIR/utilities/$1" bundled="$BASE_DIR/.offline/$1"
     mkdir -p "$BASE_DIR/utilities"
     if [[ $MD_OFFLINE -eq 1 ]]; then
         [[ -s "$dest" ]] && return 0
-        echo "Error: installing from the offline bundle, and $1 isn't in $BASE_DIR/utilities. Nothing is downloaded offline." >&2
+        if [[ -s "$bundled" ]]; then
+            cp "$bundled" "$dest" && chmod +x "$dest"
+            [[ -f "$BASE_DIR/.offline/.$1.ref" ]] && cp "$BASE_DIR/.offline/.$1.ref" "$(dirname "$dest")/.$1.ref"
+            return 0
+        fi
+        echo "Error: installing from the offline bundle ($OFFLINE_SENTINEL), which has no $1. Nothing is downloaded offline." >&2
+        echo "  Use a bundle built by markdown-server 1.6.0 or later, or move $OFFLINE_SENTINEL out of this folder to install online." >&2
         exit 1
     fi
-    fetch_helper "$dest" "$2" "$3" "${4:-}" || { echo "Error: couldn't fetch $1 (check network access)." >&2; exit 1; }
+    if ! fetch_helper "$dest" "$2" "$3" "${4:-}"; then
+        echo "Error: couldn't fetch $1. Check network access, or point ${5:-its _URL setting} at a mirror." >&2
+        exit 1
+    fi
 }
 
 # The shared images-pull-push helper (Docker install, registry-cert trust), so all callers reuse the same copy.
 ensure_ipp() {
-    helper_check image_pull_push.sh "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256"
+    helper_check image_pull_push.sh "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256" IMAGE_PULL_PUSH_URL
 }
 
 ensure_docker() {
@@ -1487,6 +1497,11 @@ do_install() {
     fi
 
     # Stop any existing stack first so the port frees up before we probe it.
+    # A registry run needs image_pull_push.sh: get it, or fail, while the running site is still up
+    if [[ $REGISTRY_MODE -eq 1 || $PUSH_MODE -eq 1 ]]; then
+        ensure_ipp
+    fi
+
     if [[ -f "$BASE_DIR/docker-compose.yml" ]]; then
         echo "  Stopping existing Markdown Server stack..."
         docker compose -f "$BASE_DIR/docker-compose.yml" down >/dev/null 2>&1 || true
@@ -1612,9 +1627,13 @@ do_save() {
     docker save "$(md_image)" | gzip > "$stage/image/$(image_tar)"
 
     echo "  Bundling Docker packages for offline install (install-packages save)..."
-    helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAGES_REF" "$INSTALL_PACKAGES_SHA256"
+    helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAGES_REF" "$INSTALL_PACKAGES_SHA256" INSTALL_PACKAGES_URL
     cp "$BASE_DIR/utilities/install_packages.sh" "$stage/install_packages.sh"
     cp "$BASE_DIR/utilities/.install_packages.sh.ref" "$stage/.install_packages.sh.ref"
+    # The bundle carries image_pull_push.sh too, so an offline install with a registry needs no download
+    ensure_ipp
+    cp "$BASE_DIR/utilities/image_pull_push.sh" "$stage/image_pull_push.sh"
+    cp "$BASE_DIR/utilities/.image_pull_push.sh.ref" "$stage/.image_pull_push.sh.ref"
     if ( cd "$stage" && ./install_packages.sh save docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ); then
         echo "  Docker packages bundled (offline-packages.tar.gz)."
     else

@@ -16,7 +16,7 @@ printf "#!/bin/bash\necho helper\n" > "$out"'
 }
 helper_sha() { printf '#!/bin/bash\necho helper\n' | sha256sum | cut -d' ' -f1; }
 ipp() { helper_check image_pull_push.sh "$IMAGE_PULL_PUSH_URL" "$IMAGE_PULL_PUSH_REF" "$IMAGE_PULL_PUSH_SHA256"; }
-ip() { helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAGES_REF" "$INSTALL_PACKAGES_SHA256"; }
+ip() { helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAGES_REF" "$INSTALL_PACKAGES_SHA256" INSTALL_PACKAGES_URL; }
 
 @test "image_pull_push.sh comes from images-pull-push v1.1.1, by tag" {
   run ensure_ipp
@@ -84,7 +84,7 @@ ip() { helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAG
   stub curl 'exit 22'
   run ip
   [ "$status" -eq 1 ]
-  [[ "$output" == *"couldn't fetch install_packages.sh"* ]]
+  [[ "$output" == *"couldn't fetch install_packages.sh. Check network access, or point INSTALL_PACKAGES_URL at a mirror"* ]]
   [ ! -e "$U/install_packages.sh" ]
 }
 @test "installing from the offline bundle uses the copy there, and never downloads" {
@@ -96,12 +96,35 @@ ip() { helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAG
   ! called curl || false
   [ "$(cat "$U/image_pull_push.sh")" = bundled ]
 }
-@test "installing from the offline bundle with no copy stops, and never downloads" {
+@test "installing from the offline bundle uses the bundle's own copy, and its record, when utilities has none" {
+  MD_OFFLINE=1
+  mkdir -p "$BASE_DIR/.offline"
+  echo from-bundle > "$BASE_DIR/.offline/image_pull_push.sh"; echo v1.1.1 > "$BASE_DIR/.offline/.image_pull_push.sh.ref"
+  run ipp
+  [ "$status" -eq 0 ]
+  ! called curl || false
+  [ "$(cat "$U/image_pull_push.sh")" = from-bundle ]
+  [ -x "$U/image_pull_push.sh" ]
+  [ "$(cat "$U/.image_pull_push.sh.ref")" = v1.1.1 ]
+}
+@test "installing from an older bundle with no copy anywhere stops before anything changes, says the ways out, and never downloads" {
   MD_OFFLINE=1
   run ipp
   [ "$status" -eq 1 ]
   [[ "$output" == *"Nothing is downloaded offline"* ]]
+  [[ "$output" == *"move md-save.tar.gz out of this folder to install online"* ]]
   ! called curl || false
+}
+@test "save bundles both helpers with their records" {
+  body=$(declare -f do_save)
+  [[ "$body" == *'cp "$BASE_DIR/utilities/image_pull_push.sh" "$stage/image_pull_push.sh"'* ]]
+  [[ "$body" == *'cp "$BASE_DIR/utilities/.image_pull_push.sh.ref" "$stage/.image_pull_push.sh.ref"'* ]]
+  [[ "$body" == *'cp "$BASE_DIR/utilities/.install_packages.sh.ref" "$stage/.install_packages.sh.ref"'* ]]
+}
+@test "a registry install gets image_pull_push.sh before it stops the running site" {
+  body=$(declare -f do_install)
+  before=${body%%Stopping existing Markdown Server stack*}
+  [[ "$before" == *"ensure_ipp"* ]]
 }
 @test "the offline install sets the flag; save never does" {
   grep -A4 'if is_offline; then' "$BATS_TEST_DIRNAME/../../install-md" | grep -q 'MD_OFFLINE=1'

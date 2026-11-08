@@ -8,8 +8,11 @@
   either no longer reaches this installer until a pin moves.
 - **A copy already in `$BASE_DIR/utilities` is reused only if it came from the same ref,** recorded beside it in a `.ref`
   file. Before, any copy was kept for good, so a host never saw a fix. A copy with no record is fetched again once.
-- **An install from the offline bundle never downloads a helper.** A `save` always fetches the pinned copies, and the
-  bundle records which `install_packages.sh` it holds.
+- **An install from the offline bundle never downloads a helper.** The bundle now carries both helpers and their `.ref`
+  records, so an offline install with a registry uses the bundle's `image_pull_push.sh`. An older bundle with no copy
+  stops and says what to do, before anything changes. A `save` always fetches the pinned copies.
+- **A registry install gets `image_pull_push.sh` before it stops the running site,** so a failed download leaves the site
+  up. A failed download's error names the `_URL` setting to point at a mirror.
 - **`INSTALL_PACKAGES_REF` is passed on to `image_pull_push.sh`,** which reads it, so one setting covers both helpers.
 
 ### Added
@@ -21,7 +24,9 @@
 
 ### Tests
 - `tests/unit/helper-pins.bats`: both default tags, the ref and URL settings and the `IPP_URL` alias, the export, reuse
-  and refetch, both checksum cases, a failed download, both offline cases, and that `save` never sets the offline flag.
+  and refetch, both checksum cases, a failed download, the offline cases (a copy in place, the bundle's copy, an older
+  bundle with none), that `save` bundles both helpers and never sets the offline flag, and that a registry install gets
+  the helper before it stops the site.
 
 ## v1.5.1 — 2026-11-07 — The air-gapped install starts Docker
 
