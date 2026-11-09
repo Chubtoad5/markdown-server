@@ -1,5 +1,19 @@
 # Changelog — markdown-server
 
+## v1.6.1 — 2026-11-09 — Air-gapped Docker on SUSE and on Rocky 10's image kernel
+
+### Fixed
+- **A SUSE bundle holds Docker** (spec 15, F2). `save` asked for Docker CE's package names, which SUSE doesn't have, so
+  the bundle had no Docker and an air-gapped SUSE install needed Docker there already. `save` and the offline install now
+  use SUSE's own `docker` and `docker-compose`, as `images-pull-push` does.
+- **An air-gapped install on Rocky, Alma or RHEL 10 no longer stops for `kernel-modules-extra`** (spec 15, F1). `save` on
+  an EL host now also bundles `kernel-modules-extra-$(uname -r)` when the build host's repos still have it, and the
+  offline install installs it from the bundle when the target runs that same kernel, then starts Docker. On another
+  kernel the message names the kernel the bundle was built for, and today's advice follows.
+
+### Tests
+- `tests/unit/docker-offline.bats`: both F1 outcomes, what `save` adds, and SUSE's package names in `save` and the offline install.
+
 ## v1.6.0 — 2026-11-08 — The helpers come from releases
 
 ### Changed

@@ -77,3 +77,59 @@ docker_stopped() { stub systemctl 'case "$1" in cat) exit 0 ;; is-active) exit 3
   called "install_packages.sh offline docker-ce"
   called "systemctl enable --now docker"
 }
+# Spec 15, F1: a bundle built on this same kernel carries its kernel-modules-extra. F2: SUSE's own Docker packages.
+offline_bundle() { # offline_bundle <rpm names...>: .offline with an archive of them and a logging install_packages.sh
+  local d; d=$(mktemp -d); mkdir -p "$d/offline-packages" "$BASE_DIR/.offline"
+  for n in "$@"; do touch "$d/offline-packages/$n"; done
+  tar -czf "$BASE_DIR/.offline/offline-packages.tar.gz" -C "$d" offline-packages
+  printf '#!/bin/bash\necho "install_packages.sh $*" >> "$STUB_LOG"\n' > "$BASE_DIR/.offline/install_packages.sh"
+  chmod +x "$BASE_DIR/.offline/install_packages.sh"
+}
+@test "F1: the bundle's kernel-modules-extra for this kernel is installed, then Docker starts" {
+  docker_stopped
+  stub modprobe 'case "$*" in *-n*) exit 1 ;; *) exit 0 ;; esac'
+  offline_bundle docker-ce-29.1.0-1.el10.x86_64.rpm kernel-modules-extra-6.12.0-211.16.1.el10_2.0.1.x86_64.rpm
+  run ensure_docker_offline
+  [ "$status" -eq 0 ]
+  called "install_packages.sh offline kernel-modules-extra-6.12.0-211.16.1.el10_2.0.1.x86_64"
+  called "systemctl enable --now docker"
+}
+@test "F1: a package for another kernel isn't used, and the message names that kernel" {
+  docker_stopped
+  stub modprobe 'exit 1'
+  offline_bundle kernel-modules-extra-6.12.0-211.74.1.el10_2.x86_64.rpm
+  run ensure_docker_offline
+  [ "$status" -eq 1 ]
+  ! called "install_packages.sh offline"
+  [[ "$output" == *"built on a host running 6.12.0-211.74.1.el10_2.x86_64"* ]]
+  [[ "$output" == *"dnf install kernel-modules-extra-6.12.0-211.16.1.el10_2.0.1.x86_64"* ]]
+}
+@test "F1: save adds the running kernel's kernel-modules-extra on EL when the repos have it, and nothing elsewhere" {
+  stub dnf 'echo kernel-modules-extra-0:6.12.0-211.16.1.el10_2.0.1.x86_64'
+  run el_modules_extra_pkg
+  [ "$output" = kernel-modules-extra-6.12.0-211.16.1.el10_2.0.1.x86_64 ]
+  stub dnf 'exit 0'
+  run el_modules_extra_pkg
+  [[ "$output" == *"isn't in this host's repos"* ]]
+  ID=opensuse-leap
+  run el_modules_extra_pkg
+  [ -z "$output" ]
+}
+@test "F2: SUSE's own Docker packages, Docker CE elsewhere" {
+  ID=opensuse-leap; [ "$(docker_packages)" = "docker docker-compose" ]
+  ID=sles; [ "$(docker_packages)" = "docker docker-compose" ]
+  ID=rocky; [ "$(docker_packages)" = "docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" ]
+  ID=ubuntu; [[ "$(docker_packages)" == docker-ce* ]]
+}
+@test "F2: on SUSE, a missing Docker is installed from the bundle under SUSE's names" {
+  ID=opensuse-leap
+  docker_stopped
+  stub modprobe 'exit 0'
+  mv "$STUB_DIR/docker" "$STUB_DIR/docker.later"
+  offline_bundle docker-29.7.2_ce-160000.8.1.x86_64.rpm
+  printf '#!/bin/bash\necho "install_packages.sh $*" >> "$STUB_LOG"\nmv "%s/docker.later" "%s/docker"\n' "$STUB_DIR" "$STUB_DIR" > "$BASE_DIR/.offline/install_packages.sh"
+  run ensure_docker_offline
+  [ "$status" -eq 0 ]
+  called "install_packages.sh offline docker docker-compose"
+  ! called "docker-ce"
+}

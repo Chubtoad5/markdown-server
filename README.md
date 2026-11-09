@@ -161,6 +161,11 @@ sudo ./install-md save                    # produces md-save.tar.gz
 sudo ./install-md install                 # detects the bundle, installs offline
 ```
 
+The bundle holds Docker's packages for the build host's distro: Docker CE, or SUSE's own `docker` and `docker-compose` on
+SLES and openSUSE. On Rocky, Alma or RHEL 10, whose images leave out the `kernel-modules-extra` that Docker needs, it
+also holds the package for the build host's running kernel. The install uses it when the target runs that same kernel, as
+a target built from the same image does.
+
 ## License
 
 See [LICENSE](LICENSE).
