@@ -1,5 +1,36 @@
 # Changelog — markdown-server
 
+## v1.6.1 — 2026-11-09 — Air-gapped Docker on SUSE and on Rocky 10's image kernel
+
+### Fixed
+- **A SUSE bundle holds Docker** (spec 15, F2). `save` asked for Docker CE's package names, which SUSE doesn't have, so
+  the bundle had no Docker and an air-gapped SUSE install needed Docker there already. `save` and the offline install now
+  use SUSE's own `docker` and `docker-compose`, as `images-pull-push` does.
+- **An air-gapped install on Rocky, Alma or RHEL 10 no longer stops for `kernel-modules-extra`** (spec 15, F1). `save` on
+  an EL host now also bundles `kernel-modules-extra-$(uname -r)` when the build host's repos still have it, and the
+  offline install installs it from the bundle when the target runs that same kernel, then starts Docker. On another
+  kernel the message names the kernel the bundle was built for, and today's advice follows.
+
+- **A SUSE bundle's Docker installs with SELinux enforcing** (spec 15, F7). `INSTALL_PACKAGES_REF` now defaults to
+  `install-packages` v1.1.3, whose SUSE `save` also takes Docker's `container-selinux`.
+
+- **Uploads work on SLES and openSUSE with SELinux enforcing.** SUSE's own `docker` package turns SELinux on in the
+  daemon (`"selinux-enabled": true`), so Caddy runs confined and could read `/srv` but not write to it. Every WebDAV
+  upload got a 404, which is how the WebDAV handler reports a failed open. The compose file's mounts now carry `:z`, so
+  Docker labels them for containers. Docker ignores it where SELinux isn't enabled. Found by F2's A1 on Leap 16: before
+  F2, a SUSE air-gapped install never got that far. Online, images-pull-push writes its own `daemon.json` first, so it
+  wasn't seen there.
+
+### Added
+- **`LICENSES/` in a save bundle** (spec 15, Q9): a manifest of what it redistributes, meaning the server image's parts
+  (Caddy, caddy-webdav, goldmark, github-markdown-css, highlight.js, and the official caddy image's Alpine base layer) and
+  the OS packages, plus a written offer for the GPL and LGPL ones. `LICENSE_OFFER_CONTACT` sets who the offer names.
+
+### Tests
+- `tests/unit/licences.bats`: the manifest, the contact, and that `save` writes it into the bundle.
+- `tests/unit/helper-pins.bats` follows the pin to v1.1.3.
+- `tests/unit/docker-offline.bats`: both F1 outcomes, what `save` adds, and SUSE's package names in `save` and the offline install.
+
 ## v1.6.0 — 2026-11-08 — The helpers come from releases
 
 ### Changed

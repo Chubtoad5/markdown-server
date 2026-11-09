@@ -109,7 +109,7 @@ The image is pushed as `<host:port>/<REGISTRY_NS>/markdown-caddy:<CADDY_VERSION>
 | `REG_USER` / `REG_PASS` | (empty) | Registry credentials (env-var alternative) |
 | `IMAGE_PULL_PUSH_REF` | `v1.1.1` | The `images-pull-push` release (a tag, branch or commit) whose `image_pull_push.sh` installs Docker and trusts a registry's certificate. A copy already in `$BASE_DIR/utilities` is reused only if it came from the same ref |
 | `IMAGE_PULL_PUSH_URL` (`IPP_URL`) | the ref's file on `raw.githubusercontent.com` | Full URL of `image_pull_push.sh`, for a mirror. Wins over the ref. `IPP_URL` is the older name |
-| `INSTALL_PACKAGES_REF` | `v1.1.2` | The `install-packages` release whose `install_packages.sh` `save` bundles for the offline Docker install. Passed on to `image_pull_push.sh` too, so one setting covers both helpers |
+| `INSTALL_PACKAGES_REF` | `v1.1.3` | The `install-packages` release whose `install_packages.sh` `save` bundles for the offline Docker install. Passed on to `image_pull_push.sh` too, so one setting covers both helpers |
 | `INSTALL_PACKAGES_URL` | the ref's file on `raw.githubusercontent.com` | Full URL of `install_packages.sh`, for a mirror. Wins over the ref |
 | `IMAGE_PULL_PUSH_SHA256` / `INSTALL_PACKAGES_SHA256` | (empty) | Optional checksums. A mismatch, or a failed download, stops the run and leaves no file. An install from the offline bundle never downloads either helper |
 
@@ -160,6 +160,15 @@ sudo ./install-md save                    # produces md-save.tar.gz
 # Transfer install-md + md-save.tar.gz to the target, then:
 sudo ./install-md install                 # detects the bundle, installs offline
 ```
+
+The bundle holds Docker's packages for the build host's distro: Docker CE, or SUSE's own `docker` and `docker-compose` on
+SLES and openSUSE. On an EL host it also holds the package for the build host's running kernel's `kernel-modules-extra`, which Docker
+needs and Rocky, Alma and RHEL 10's images leave out. The install uses it when the target runs that same kernel, as
+a target built from the same image does.
+
+The bundle also holds `LICENSES/`: a manifest of what it redistributes (the server image's parts and the OS packages),
+and a written offer for the GPL and LGPL ones. Set `LICENSE_OFFER_CONTACT` to who the offer tells people to ask (default:
+the Chubtoad5 project).
 
 ## License
 

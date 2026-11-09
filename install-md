@@ -20,16 +20,18 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.6.1"
 # Helper scripts come from releases, not main (spec 14, as spec 12 did for rke2 and SeaweedFS). A URL wins over its ref,
 # IPP_URL still works as an alias for IMAGE_PULL_PUSH_URL, and a checksum is optional.
 IMAGE_PULL_PUSH_REF="${IMAGE_PULL_PUSH_REF:-v1.1.1}"
 IMAGE_PULL_PUSH_URL="${IMAGE_PULL_PUSH_URL:-${IPP_URL:-https://raw.githubusercontent.com/Chubtoad5/images-pull-push/${IMAGE_PULL_PUSH_REF}/image_pull_push.sh}}"
 IMAGE_PULL_PUSH_SHA256="${IMAGE_PULL_PUSH_SHA256:-}"
 IPP_URL="$IMAGE_PULL_PUSH_URL"
-INSTALL_PACKAGES_REF="${INSTALL_PACKAGES_REF:-v1.1.2}"
+INSTALL_PACKAGES_REF="${INSTALL_PACKAGES_REF:-v1.1.3}"
 INSTALL_PACKAGES_URL="${INSTALL_PACKAGES_URL:-https://raw.githubusercontent.com/Chubtoad5/install-packages/${INSTALL_PACKAGES_REF}/install_packages.sh}"
 INSTALL_PACKAGES_SHA256="${INSTALL_PACKAGES_SHA256:-}"
+# Who the save bundle's written offer for its GPL/LGPL parts tells people to ask for source code
+LICENSE_OFFER_CONTACT="${LICENSE_OFFER_CONTACT:-the Chubtoad5 project via https://github.com/Chubtoad5}"
 export INSTALL_PACKAGES_REF          # image_pull_push.sh reads it too, so one setting covers both helpers
 MD_OFFLINE=0                         # set by an install from the offline bundle: the helpers are never downloaded then
 
@@ -345,6 +347,38 @@ extract_offline_bundle() {
     tar xzf "$(pwd)/$OFFLINE_SENTINEL" -C "$BASE_DIR/.offline"
 }
 
+# The Docker packages for this distro, as images-pull-push picks them. SUSE has no Docker CE, so it uses its own (spec
+# 15, F2).
+docker_packages() {
+    case "${ID:-}" in
+        sles|opensuse-leap) echo "docker docker-compose" ;;
+        *) echo "docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin" ;;
+    esac
+}
+
+# On an EL host, the running kernel's kernel-modules-extra when this host's repos still have it, so that the bundle carries
+# it. A target built from the same image then gets xt_addrtype with no local media (spec 15, F1). Prints nothing
+# elsewhere, and a note on stderr when the repos no longer have it.
+el_modules_extra_pkg() {
+    case "${ID:-}" in rhel|centos|rocky|almalinux|fedora) ;; *) return 0 ;; esac
+    local pkg
+    pkg="kernel-modules-extra-$(uname -r)"
+    if [[ -n "$(dnf -q repoquery --available "$pkg" 2>/dev/null)" ]]; then
+        echo "$pkg"
+    else
+        echo "  Note: $pkg isn't in this host's repos, so the bundle won't carry it. A target that lacks xt_addrtype will need it from local media." >&2
+    fi
+}
+
+# bundled_modules_extra <archive>: the kernel-modules-extra package the archive carries, as kernel-modules-extra-<kernel>,
+# or nothing
+bundled_modules_extra() {
+    local listing
+    [[ -f "$1" ]] || return 0
+    listing=$(tar -tzf "$1" 2>/dev/null) || return 0
+    sed -n 's#^.*/\(kernel-modules-extra-[0-9][^/]*\)\.rpm$#\1#p' <<< "$listing" | tail -n 1
+}
+
 ensure_docker_offline() {
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
         echo "  Docker and compose plugin present."
@@ -352,7 +386,9 @@ ensure_docker_offline() {
         echo "  Docker missing — installing from bundled offline packages..."
         local off="$BASE_DIR/.offline"
         if [[ -f "$off/offline-packages.tar.gz" && -x "$off/install_packages.sh" ]]; then
-            ( cd "$off" && ./install_packages.sh offline docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin )
+            local pkgs
+            read -r -a pkgs <<< "$(docker_packages)"
+            ( cd "$off" && ./install_packages.sh offline "${pkgs[@]}" )
         else
             echo "Error: offline bundle has no Docker packages and Docker is not installed on this host." >&2
             exit 1
@@ -373,12 +409,24 @@ ensure_docker_offline() {
 
 # Rocky, Alma and RHEL 10 keep the module Docker needs for its NAT rules (xt_addrtype) in kernel-modules-extra, which
 # their cloud images leave out, so Docker can't start without it. Online, images-pull-push installs the running
-# kernel's package. Here nothing can be fetched, so it says what to do. Spec 11, U2.
+# kernel's package. Here nothing can be fetched: a bundle built on a host running this same kernel carries its package
+# (spec 15, F1), and otherwise it says what to do (spec 11, U2).
 check_el_docker_modules_offline() {
     case "${ID:-}" in rhel|centos|rocky|almalinux|fedora) ;; *) return 0 ;; esac
     modprobe -n xt_addrtype >/dev/null 2>&1 && return 0
-    local kver dir newer=""
+    local kver dir newer="" off="$BASE_DIR/.offline" bundled
     kver=$(uname -r)
+    bundled=$(bundled_modules_extra "$off/offline-packages.tar.gz")
+    if [[ "$bundled" == "kernel-modules-extra-$kver" && -x "$off/install_packages.sh" ]]; then
+        echo "  Installing kernel-modules-extra-$kver from the bundle..."
+        if ( cd "$off" && ./install_packages.sh offline "kernel-modules-extra-$kver" ) && modprobe xt_addrtype; then
+            echo "  xt_addrtype kernel module loaded."
+            return 0
+        fi
+        echo "Error: kernel-modules-extra-$kver from the bundle didn't give the running kernel xt_addrtype." >&2
+        exit 1
+    fi
+    [[ -n "$bundled" ]] && echo "  The bundle carries $bundled, which is for another kernel: it was built on a host running ${bundled#kernel-modules-extra-}." >&2
     for dir in "${MODULES_ROOT:-/lib/modules}"/*/; do
         dir=${dir%/}
         [[ "${dir##*/}" == "$kver" ]] && continue
@@ -392,6 +440,67 @@ check_el_docker_modules_offline() {
         echo "  then run this again." >&2
     fi
     exit 1
+}
+
+# generate_bundle_licenses <stage dir>: LICENSES/ for a save bundle (spec 15, Q9). A manifest of what it redistributes, and a
+# written offer for the GPL and LGPL parts: OS packages such as iptables, the kernel's modules on EL and the SELinux
+# policy on SUSE, and the Caddy image's Alpine base layer (BusyBox).
+generate_bundle_licenses() {
+    local dir="$1/LICENSES" pkg_archive="$1/offline-packages.tar.gz" listing="" caddy_ver="$CADDY_VERSION"
+    mkdir -p "$dir"
+    # With CADDY_VERSION=latest, record the version the image really has
+    if [[ "$caddy_ver" == latest ]]; then
+        caddy_ver=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$(caddy_runtime_tag)" 2>/dev/null) || caddy_ver=""
+        caddy_ver=${caddy_ver:-latest}
+    fi
+    if [[ -f "$pkg_archive" ]]; then
+        listing=$(tar -tzf "$pkg_archive" 2>/dev/null | sed -n 's#^.*/\([^/]*\.\(deb\|rpm\)\)$#  \1#p' | sort) || listing=""
+    fi
+    cat > "$dir/THIRD_PARTY_NOTICES.txt" <<EOF
+Third-party components redistributed in this markdown-server save bundle
+Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+The server image, image/$(image_tar), built from caddy:${CADDY_VERSION} (Caddy ${caddy_ver}):
+  Caddy ${caddy_ver} ........................ Apache-2.0   https://github.com/caddyserver/caddy
+  caddy-webdav ........................ Apache-2.0   https://github.com/mholt/caddy-webdav
+  goldmark ............................ MIT          https://github.com/yuin/goldmark
+  github-markdown-css 5.2.0 ........... MIT          https://github.com/sindresorhus/github-markdown-css
+  highlight.js 11.8.0 and its theme ... BSD-3-Clause https://github.com/highlightjs/highlight.js
+  The official caddy image's base layer is Alpine Linux. Its packages carry their own licences;
+  some are copyleft, such as BusyBox (GPL-2.0). Source: https://gitlab.alpinelinux.org/alpine/aports
+  The image holds these as built binaries and asset files, without their licence texts: each
+  licence is at the URL above. The Apache-2.0 text is also in this repository's LICENSE.
+
+OS packages in offline-packages.tar.gz, for installing Docker with no route out: Docker and
+containerd (Apache-2.0), and what they need on this OS. Each package carries its own licence
+(rpm -q --licensefiles <package>, or /usr/share/doc/<package>/copyright once installed). Some
+are copyleft, for example iptables (GPL-2.0), on RHEL-family hosts the running kernel's
+kernel-modules-extra (GPL-2.0), and on SUSE the SELinux policy packages (GPL-2.0). The packages:
+${listing:-  (none)}
+
+install-md, install_packages.sh and image_pull_push.sh are Apache-2.0 (Chubtoad5).
+The GPL and LGPL parts above are covered by WRITTEN_OFFER.txt.
+EOF
+    cat > "$dir/WRITTEN_OFFER.txt" <<EOF
+WRITTEN OFFER FOR CORRESPONDING SOURCE CODE (GPL, LGPL)
+
+This save bundle redistributes, in binary form, operating system packages in
+offline-packages.tar.gz and the Alpine Linux packages in the server image's base layer.
+THIRD_PARTY_NOTICES.txt lists them. Some are licensed under the GNU General Public License or
+the GNU Lesser General Public License.
+
+The distributor of this bundle hereby makes a written offer, valid for three (3) years from the
+date this bundle was created ($(date -u +%Y-%m-%d)), to give any third party who possesses this
+bundle a complete machine-readable copy of the corresponding source code for those packages,
+for a charge no more than the cost of physically performing the source distribution.
+
+The source is also publicly available from the distribution that each package came from (for
+example, apt-get source <package> on Debian and Ubuntu, or Alpine's aports).
+
+To request the source on a physical medium, contact: ${LICENSE_OFFER_CONTACT}
+
+This offer is independent of the Apache-2.0 license covering the scripts themselves.
+EOF
 }
 
 load_offline_image() {
@@ -1428,6 +1537,9 @@ generate_compose() {
         pull_policy="never"
     fi
     # No ./assets mount: assets are baked into the image (portable + offline-safe).
+    # :z relabels the mounts for containers. SUSE's own docker package turns SELinux on in the daemon, so without it the
+    # confined Caddy can read /srv but not write to it, and every WebDAV upload fails with a 404. Docker ignores :z where
+    # SELinux isn't enabled.
     cat > "$BASE_DIR/docker-compose.yml" <<EOF
 services:
   caddy:
@@ -1436,8 +1548,8 @@ services:
     ports:
       - "$TCP_PORT:$TCP_PORT"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - ./srv:/srv
+      - ./Caddyfile:/etc/caddy/Caddyfile:z
+      - ./srv:/srv:z
     restart: unless-stopped
 EOF
 }
@@ -1634,11 +1746,19 @@ do_save() {
     ensure_ipp
     cp "$BASE_DIR/utilities/image_pull_push.sh" "$stage/image_pull_push.sh"
     cp "$BASE_DIR/utilities/.image_pull_push.sh.ref" "$stage/.image_pull_push.sh.ref"
-    if ( cd "$stage" && ./install_packages.sh save docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ); then
+    local pkgs extra
+    read -r -a pkgs <<< "$(docker_packages)"
+    extra=$(el_modules_extra_pkg)
+    if ( cd "$stage" && ./install_packages.sh save "${pkgs[@]}" ${extra:+"$extra"} ); then
         echo "  Docker packages bundled (offline-packages.tar.gz)."
+    elif [[ -n "$extra" ]] && ( cd "$stage" && ./install_packages.sh save "${pkgs[@]}" ); then
+        # The kernel package, or something it needs, didn't download (a lagging mirror, say): keep Docker without it
+        echo "  WARNING: $extra couldn't be saved, so the bundle has Docker without it. A target that lacks xt_addrtype will need it from local media." >&2
     else
         echo "  WARNING: Docker package save failed; offline install will require Docker pre-installed on the target." >&2
     fi
+
+    generate_bundle_licenses "$stage"
 
     cat > "$stage/save-manifest.txt" <<EOF
 image=$(md_image)
