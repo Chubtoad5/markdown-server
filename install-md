@@ -27,9 +27,11 @@ IMAGE_PULL_PUSH_REF="${IMAGE_PULL_PUSH_REF:-v1.1.1}"
 IMAGE_PULL_PUSH_URL="${IMAGE_PULL_PUSH_URL:-${IPP_URL:-https://raw.githubusercontent.com/Chubtoad5/images-pull-push/${IMAGE_PULL_PUSH_REF}/image_pull_push.sh}}"
 IMAGE_PULL_PUSH_SHA256="${IMAGE_PULL_PUSH_SHA256:-}"
 IPP_URL="$IMAGE_PULL_PUSH_URL"
-INSTALL_PACKAGES_REF="${INSTALL_PACKAGES_REF:-v1.1.2}"
+INSTALL_PACKAGES_REF="${INSTALL_PACKAGES_REF:-v1.1.3}"
 INSTALL_PACKAGES_URL="${INSTALL_PACKAGES_URL:-https://raw.githubusercontent.com/Chubtoad5/install-packages/${INSTALL_PACKAGES_REF}/install_packages.sh}"
 INSTALL_PACKAGES_SHA256="${INSTALL_PACKAGES_SHA256:-}"
+# Who the save bundle's written offer for its GPL/LGPL parts tells people to ask for source code
+LICENSE_OFFER_CONTACT="${LICENSE_OFFER_CONTACT:-the Chubtoad5 project via https://github.com/Chubtoad5}"
 export INSTALL_PACKAGES_REF          # image_pull_push.sh reads it too, so one setting covers both helpers
 MD_OFFLINE=0                         # set by an install from the offline bundle: the helpers are never downloaded then
 
@@ -438,6 +440,61 @@ check_el_docker_modules_offline() {
         echo "  then run this again." >&2
     fi
     exit 1
+}
+
+# generate_bundle_licenses <stage dir>: LICENSES/ for a save bundle (spec 15, Q9). A manifest of what it redistributes, and a
+# written offer for the GPL and LGPL parts: OS packages such as iptables, the kernel's modules on EL and the SELinux
+# policy on SUSE, and the Caddy image's Alpine base layer (BusyBox).
+generate_bundle_licenses() {
+    local dir="$1/LICENSES" pkg_archive="$1/offline-packages.tar.gz" listing=""
+    mkdir -p "$dir"
+    if [[ -f "$pkg_archive" ]]; then
+        listing=$(tar -tzf "$pkg_archive" 2>/dev/null | sed -n 's#^.*/\([^/]*\.\(deb\|rpm\)\)$#  \1#p' | sort) || listing=""
+    fi
+    cat > "$dir/THIRD_PARTY_NOTICES.txt" <<EOF
+Third-party components redistributed in this markdown-server save bundle
+Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+The server image, image/$(image_tar), built from caddy:${CADDY_VERSION}:
+  Caddy ${CADDY_VERSION} ........................ Apache-2.0   https://github.com/caddyserver/caddy
+  caddy-webdav ........................ Apache-2.0   https://github.com/mholt/caddy-webdav
+  goldmark ............................ MIT          https://github.com/yuin/goldmark
+  github-markdown-css 5.2.0 ........... MIT          https://github.com/sindresorhus/github-markdown-css
+  highlight.js 11.8.0 and its theme ... BSD-3-Clause https://github.com/highlightjs/highlight.js
+  The official caddy image's base layer is Alpine Linux. Its packages carry their own licences;
+  some are copyleft, such as BusyBox (GPL-2.0). Source: https://gitlab.alpinelinux.org/alpine/aports
+  Each component keeps its own licence and notice files inside the image.
+
+OS packages in offline-packages.tar.gz, for installing Docker with no route out: Docker and
+containerd (Apache-2.0), and what they need on this OS. Each package carries its own licence
+(rpm -q --licensefiles <package>, or /usr/share/doc/<package>/copyright once installed). Some
+are copyleft, for example iptables (GPL-2.0), on RHEL-family hosts the running kernel's
+kernel-modules-extra (GPL-2.0), and on SUSE the SELinux policy packages (GPL-2.0). The packages:
+${listing:-  (none)}
+
+install-md, install_packages.sh and image_pull_push.sh are Apache-2.0 (Chubtoad5).
+The GPL and LGPL parts above are covered by WRITTEN_OFFER.txt.
+EOF
+    cat > "$dir/WRITTEN_OFFER.txt" <<EOF
+WRITTEN OFFER FOR CORRESPONDING SOURCE CODE (GPL, LGPL)
+
+This save bundle redistributes, in binary form, operating system packages in
+offline-packages.tar.gz and the Alpine Linux packages in the server image's base layer.
+THIRD_PARTY_NOTICES.txt lists them. Some are licensed under the GNU General Public License or
+the GNU Lesser General Public License.
+
+The distributor of this bundle hereby makes a written offer, valid for three (3) years from the
+date this bundle was created ($(date -u +%Y-%m-%d)), to give any third party who possesses this
+bundle a complete machine-readable copy of the corresponding source code for those packages,
+for a charge no more than the cost of physically performing the source distribution.
+
+The source is also publicly available from the distribution that each package came from (for
+example, apt-get source <package> on Debian and Ubuntu, or Alpine's aports).
+
+To request the source on a physical medium, contact: ${LICENSE_OFFER_CONTACT}
+
+This offer is independent of the Apache-2.0 license covering the scripts themselves.
+EOF
 }
 
 load_offline_image() {
@@ -1688,6 +1745,8 @@ do_save() {
     else
         echo "  WARNING: Docker package save failed; offline install will require Docker pre-installed on the target." >&2
     fi
+
+    generate_bundle_licenses "$stage"
 
     cat > "$stage/save-manifest.txt" <<EOF
 image=$(md_image)

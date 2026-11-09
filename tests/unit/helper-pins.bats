@@ -25,11 +25,11 @@ ip() { helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAG
   [ -x "$U/image_pull_push.sh" ]
   [ "$(cat "$U/.image_pull_push.sh.ref")" = v1.1.1 ]
 }
-@test "install_packages.sh comes from install-packages v1.1.2, by tag" {
+@test "install_packages.sh comes from install-packages v1.1.3, by tag" {
   run ip
   [ "$status" -eq 0 ]
-  called "curl -fsSL https://raw.githubusercontent.com/Chubtoad5/install-packages/v1.1.2/install_packages.sh"
-  [ "$(cat "$U/.install_packages.sh.ref")" = v1.1.2 ]
+  called "curl -fsSL https://raw.githubusercontent.com/Chubtoad5/install-packages/v1.1.3/install_packages.sh"
+  [ "$(cat "$U/.install_packages.sh.ref")" = v1.1.3 ]
 }
 @test "the refs set the URLs" {
   unset IMAGE_PULL_PUSH_URL IPP_URL INSTALL_PACKAGES_URL
@@ -50,7 +50,7 @@ ip() { helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAG
 }
 @test "INSTALL_PACKAGES_REF is exported, so image_pull_push.sh fetches the same install_packages.sh" {
   run bash -c 'echo "$INSTALL_PACKAGES_REF"'
-  [ "$output" = v1.1.2 ]
+  [ "$output" = v1.1.3 ]
 }
 @test "a copy whose record names the same ref is reused" {
   ipp >/dev/null
@@ -67,7 +67,7 @@ ip() { helper_check install_packages.sh "$INSTALL_PACKAGES_URL" "$INSTALL_PACKAG
   ip >/dev/null
   grep -q "echo helper" "$U/image_pull_push.sh"
   grep -q "echo helper" "$U/install_packages.sh"
-  [ "$(cat "$U/.install_packages.sh.ref")" = v1.1.2 ]
+  [ "$(cat "$U/.install_packages.sh.ref")" = v1.1.3 ]
 }
 @test "a matching checksum passes, and a mismatch stops and leaves no file" {
   INSTALL_PACKAGES_SHA256=$(helper_sha)
