@@ -446,8 +446,13 @@ check_el_docker_modules_offline() {
 # written offer for the GPL and LGPL parts: OS packages such as iptables, the kernel's modules on EL and the SELinux
 # policy on SUSE, and the Caddy image's Alpine base layer (BusyBox).
 generate_bundle_licenses() {
-    local dir="$1/LICENSES" pkg_archive="$1/offline-packages.tar.gz" listing=""
+    local dir="$1/LICENSES" pkg_archive="$1/offline-packages.tar.gz" listing="" caddy_ver="$CADDY_VERSION"
     mkdir -p "$dir"
+    # With CADDY_VERSION=latest, record the version the image really has
+    if [[ "$caddy_ver" == latest ]]; then
+        caddy_ver=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$(caddy_runtime_tag)" 2>/dev/null) || caddy_ver=""
+        caddy_ver=${caddy_ver:-latest}
+    fi
     if [[ -f "$pkg_archive" ]]; then
         listing=$(tar -tzf "$pkg_archive" 2>/dev/null | sed -n 's#^.*/\([^/]*\.\(deb\|rpm\)\)$#  \1#p' | sort) || listing=""
     fi
@@ -455,15 +460,16 @@ generate_bundle_licenses() {
 Third-party components redistributed in this markdown-server save bundle
 Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-The server image, image/$(image_tar), built from caddy:${CADDY_VERSION}:
-  Caddy ${CADDY_VERSION} ........................ Apache-2.0   https://github.com/caddyserver/caddy
+The server image, image/$(image_tar), built from caddy:${CADDY_VERSION} (Caddy ${caddy_ver}):
+  Caddy ${caddy_ver} ........................ Apache-2.0   https://github.com/caddyserver/caddy
   caddy-webdav ........................ Apache-2.0   https://github.com/mholt/caddy-webdav
   goldmark ............................ MIT          https://github.com/yuin/goldmark
   github-markdown-css 5.2.0 ........... MIT          https://github.com/sindresorhus/github-markdown-css
   highlight.js 11.8.0 and its theme ... BSD-3-Clause https://github.com/highlightjs/highlight.js
   The official caddy image's base layer is Alpine Linux. Its packages carry their own licences;
   some are copyleft, such as BusyBox (GPL-2.0). Source: https://gitlab.alpinelinux.org/alpine/aports
-  Each component keeps its own licence and notice files inside the image.
+  The image holds these as built binaries and asset files, without their licence texts: each
+  licence is at the URL above. The Apache-2.0 text is also in this repository's LICENSE.
 
 OS packages in offline-packages.tar.gz, for installing Docker with no route out: Docker and
 containerd (Apache-2.0), and what they need on this OS. Each package carries its own licence
@@ -1742,6 +1748,9 @@ do_save() {
     extra=$(el_modules_extra_pkg)
     if ( cd "$stage" && ./install_packages.sh save "${pkgs[@]}" ${extra:+"$extra"} ); then
         echo "  Docker packages bundled (offline-packages.tar.gz)."
+    elif [[ -n "$extra" ]] && ( cd "$stage" && ./install_packages.sh save "${pkgs[@]}" ); then
+        # The kernel package, or something it needs, didn't download (a lagging mirror, say): keep Docker without it
+        echo "  WARNING: $extra couldn't be saved, so the bundle has Docker without it. A target that lacks xt_addrtype will need it from local media." >&2
     else
         echo "  WARNING: Docker package save failed; offline install will require Docker pre-installed on the target." >&2
     fi
