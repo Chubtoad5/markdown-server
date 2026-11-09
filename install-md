@@ -1537,6 +1537,9 @@ generate_compose() {
         pull_policy="never"
     fi
     # No ./assets mount: assets are baked into the image (portable + offline-safe).
+    # :z relabels the mounts for containers. SUSE's own docker package turns SELinux on in the daemon, so without it the
+    # confined Caddy can read /srv but not write to it, and every WebDAV upload fails with a 404. Docker ignores :z where
+    # SELinux isn't enabled.
     cat > "$BASE_DIR/docker-compose.yml" <<EOF
 services:
   caddy:
@@ -1545,8 +1548,8 @@ services:
     ports:
       - "$TCP_PORT:$TCP_PORT"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile
-      - ./srv:/srv
+      - ./Caddyfile:/etc/caddy/Caddyfile:z
+      - ./srv:/srv:z
     restart: unless-stopped
 EOF
 }

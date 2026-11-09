@@ -14,6 +14,13 @@
 - **A SUSE bundle's Docker installs with SELinux enforcing** (spec 15, F7). `INSTALL_PACKAGES_REF` now defaults to
   `install-packages` v1.1.3, whose SUSE `save` also takes Docker's `container-selinux`.
 
+- **Uploads work on SLES and openSUSE with SELinux enforcing.** SUSE's own `docker` package turns SELinux on in the
+  daemon (`"selinux-enabled": true`), so Caddy runs confined and could read `/srv` but not write to it. Every WebDAV
+  upload got a 404, which is how the WebDAV handler reports a failed open. The compose file's mounts now carry `:z`, so
+  Docker labels them for containers. Docker ignores it where SELinux isn't enabled. Found by F2's A1 on Leap 16: before
+  F2, a SUSE air-gapped install never got that far. Online, images-pull-push writes its own `daemon.json` first, so it
+  wasn't seen there.
+
 ### Added
 - **`LICENSES/` in a save bundle** (spec 15, Q9): a manifest of what it redistributes, meaning the server image's parts
   (Caddy, caddy-webdav, goldmark, github-markdown-css, highlight.js, and the official caddy image's Alpine base layer) and

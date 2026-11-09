@@ -133,3 +133,9 @@ offline_bundle() { # offline_bundle <rpm names...>: .offline with an archive of 
   called "install_packages.sh offline docker docker-compose"
   ! called "docker-ce"
 }
+@test "the compose mounts carry :z, so a confined container can write /srv where Docker's SELinux is on (SUSE's default)" {
+  BASE_DIR=$(mktemp -d) TCP_PORT=8080
+  generate_compose >/dev/null 2>&1 || true
+  grep -q -- '- ./srv:/srv:z$' "$BASE_DIR/docker-compose.yml"
+  grep -q -- '- ./Caddyfile:/etc/caddy/Caddyfile:z$' "$BASE_DIR/docker-compose.yml"
+}
