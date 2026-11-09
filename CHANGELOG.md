@@ -11,7 +11,17 @@
   offline install installs it from the bundle when the target runs that same kernel, then starts Docker. On another
   kernel the message names the kernel the bundle was built for, and today's advice follows.
 
+- **A SUSE bundle's Docker installs with SELinux enforcing** (spec 15, F7). `INSTALL_PACKAGES_REF` now defaults to
+  `install-packages` v1.1.3, whose SUSE `save` also takes Docker's `container-selinux`.
+
+### Added
+- **`LICENSES/` in a save bundle** (spec 15, Q9): a manifest of what it redistributes, meaning the server image's parts
+  (Caddy, caddy-webdav, goldmark, github-markdown-css, highlight.js, and the official caddy image's Alpine base layer) and
+  the OS packages, plus a written offer for the GPL and LGPL ones. `LICENSE_OFFER_CONTACT` sets who the offer names.
+
 ### Tests
+- `tests/unit/licences.bats`: the manifest, the contact, and that `save` writes it into the bundle.
+- `tests/unit/helper-pins.bats` follows the pin to v1.1.3.
 - `tests/unit/docker-offline.bats`: both F1 outcomes, what `save` adds, and SUSE's package names in `save` and the offline install.
 
 ## v1.6.0 — 2026-11-08 — The helpers come from releases
