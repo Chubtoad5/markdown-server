@@ -1,0 +1,3 @@
+# Spec 09's A5 for markdown-server: the last release installed and given content, then the commit under test installed
+# over it with the same settings. Run by automation-ci's ci/scenario.sh.
+role host 2 4096 tests/scenarios/a5-upgrade.sh
