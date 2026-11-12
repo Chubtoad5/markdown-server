@@ -11,8 +11,9 @@
   hashed.
 - **An admin user name the Caddyfile can't carry is refused** (spec 21, M2). It went into the Caddyfile as written:
   a space broke the Caddyfile after the site was stopped, `#admin` made every login fail, `{$HOME}` became a path, and
-  `ad:min` could never log in. `MD_ADMIN_USER` is now letters, digits and `. _ @ + -`. Anything else stops the run with
-  a message naming `MD_ADMIN_USER`, before anything changes.
+  `ad:min` could never log in. `MD_ADMIN_USER` is now letters, digits and `. _ @ + -` (spec 21, Q2). Anything else
+  stops the run with a message naming `MD_ADMIN_USER`, before anything changes. A few names that did work, such as
+  `admin!`, are refused too.
 - **A re-run without `MD_ADMIN_PASSWORD` keeps the login** (spec 21, M3). Before, the hash was made again on every run
   from `${MD_ADMIN_PASSWORD:-changeme}`, so an upgrade that didn't pass the password set the login back to `changeme`,
   and so did an empty value. Now an unset `MD_ADMIN_PASSWORD` keeps the stored login, and an empty one is refused. A
