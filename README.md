@@ -12,6 +12,7 @@ Serve a directory of Markdown files as a browsable website, using Caddy in Docke
 - [Commands](#commands)
 - [Private registry (Harbor, etc.)](#private-registry-harbor-etc)
 - [Configuration (environment variables)](#configuration-environment-variables)
+- [Admin login](#admin-login)
 - [Adding content](#adding-content)
 - [Reading content programmatically (AI agents)](#reading-content-programmatically-ai-agents)
 - [Air-gapped install](#air-gapped-install)
@@ -48,7 +49,7 @@ chmod +x install-md
 sudo ./install-md install
 ```
 
-Then open `http://<host-ip>/` and the upload UI at `http://<host-ip>/admin` (default `admin` / `changeme` — change it!).
+Then open `http://<host-ip>/` and the upload UI at `http://<host-ip>/admin` (default `admin` / `changeme` — change it with `MD_ADMIN_PASSWORD`; see [Admin login](#admin-login)).
 
 Override any setting at runtime, e.g.:
 
@@ -98,8 +99,8 @@ The image is pushed as `<host:port>/<REGISTRY_NS>/markdown-caddy:<CADDY_VERSION>
 | `CADDY_VERSION` | `latest` | Caddy base image tag |
 | `MAX_FOLDER_DEPTH` | `5` | Folder nesting shown in sidebar / allowed in the UI |
 | `AUTH_MODE` | `basic` | `basic` / `none` / `forward` (guards `/admin` + `/dav`) |
-| `MD_ADMIN_USER` | `admin` | basic-auth user |
-| `MD_ADMIN_PASSWORD` | `changeme` | basic-auth password |
+| `MD_ADMIN_USER` | the last install's, else `admin` | basic-auth user: letters, digits and `. _ @ + -` |
+| `MD_ADMIN_PASSWORD` | the last install's, else `changeme` | basic-auth password, up to 128 characters. Unset keeps the stored one; empty is refused |
 | `ENABLE_WEBDAV` | `true` | Enable `/dav` + `/admin` |
 | `FORWARD_AUTH_URL` | (empty) | `AUTH_MODE=forward`: IdP outpost URL |
 | `MD_RESET` | `false` | Wipe content on install (backup still taken) |
@@ -112,6 +113,25 @@ The image is pushed as `<host:port>/<REGISTRY_NS>/markdown-caddy:<CADDY_VERSION>
 | `INSTALL_PACKAGES_REF` | `v1.1.3` | The `install-packages` release whose `install_packages.sh` `save` bundles for the offline Docker install. Passed on to `image_pull_push.sh` too, so one setting covers both helpers |
 | `INSTALL_PACKAGES_URL` | the ref's file on `raw.githubusercontent.com` | Full URL of `install_packages.sh`, for a mirror. Wins over the ref |
 | `IMAGE_PULL_PUSH_SHA256` / `INSTALL_PACKAGES_SHA256` | (empty) | Optional checksums. A mismatch, or a failed download, stops the run and leaves no file. An install from the offline bundle never downloads either helper |
+
+## Admin login
+
+With `AUTH_MODE=basic` (the default), `/admin` and `/dav` ask for `MD_ADMIN_USER` and `MD_ADMIN_PASSWORD`.
+
+- **The password** can be up to 128 characters: letters, digits, the space and every symbol, as typed. A tab, a newline
+  or another control character is refused. Caddy stores an argon2id hash of it. The installer hands the password to
+  Caddy on stdin, so it never shows in `ps`. The closing banner names the variable, not the password, and
+  `md-install.log` is readable by root only (0600).
+- **The user name** is letters, digits and `. _ @ + -`. Anything else is refused.
+- **A re-run keeps the login.** Leave `MD_ADMIN_PASSWORD` unset to keep the stored password, or set it to change the
+  password. An empty `MD_ADMIN_PASSWORD` is refused. A first install with no password gets `changeme`, and the banner
+  says to change it. The stored login is `$BASE_DIR/.auth-hash`, readable by root only.
+- **Refusals come first.** Every check on the login runs before anything is stopped or changed, so a refused re-run
+  leaves the running site as it was.
+- **A re-run that changes nothing doesn't restart Caddy.** A new password or a changed setting restarts it once.
+- **Older installs and images:** an install by v1.6.1 or earlier keeps its bcrypt hash until the password changes.
+  A Caddy older than 2.11 (an old bundle or registry image, or an older `CADDY_VERSION`) has no argon2id, so the
+  password is hashed with bcrypt, which takes up to 72 bytes; a longer password is refused before the site is stopped.
 
 ## Adding content
 

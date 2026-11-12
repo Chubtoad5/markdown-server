@@ -1,5 +1,65 @@
 # Changelog — markdown-server
 
+## v1.7.0 — 2026-11-12 — Any admin password works, and a re-run keeps it
+
+### Fixed
+- **An admin password over 72 bytes works, and a refused re-run no longer leaves the site down** (spec 21, M1). Caddy
+  hashed the password with bcrypt, which stops at 72 bytes, and by then the running site had been stopped, so it stayed
+  down until a re-run with a shorter password. The hash is now argon2id. The installer gives the password to Caddy's
+  `hash-password` on stdin instead of `--plaintext`, where `ps` showed it to every local account. Every check on the
+  login now comes before anything is stopped, and the running site stays up while the image is built and the password
+  hashed.
+- **An admin user name the Caddyfile can't carry is refused** (spec 21, M2). It went into the Caddyfile as written:
+  a space broke the Caddyfile after the site was stopped, `#admin` made every login fail, `{$HOME}` became a path, and
+  `ad:min` could never log in. `MD_ADMIN_USER` is now letters, digits and `. _ @ + -` (spec 21, Q2). Anything else
+  stops the run with a message naming `MD_ADMIN_USER`, before anything changes. A few names that did work, such as
+  `admin!`, are refused too.
+- **A re-run without `MD_ADMIN_PASSWORD` keeps the login** (spec 21, M3). Before, the hash was made again on every run
+  from `${MD_ADMIN_PASSWORD:-changeme}`, so an upgrade that didn't pass the password set the login back to `changeme`,
+  and so did an empty value. Now an unset `MD_ADMIN_PASSWORD` keeps the stored login, and an empty one is refused. A
+  first install with no password still gets `changeme`, and the banner says to change it.
+- **The install no longer prints the admin password** (spec 21, M4). The closing banner printed it, and
+  `md-install.log`, where it was copied, was readable by every local account. The banner now says where the password
+  came from (`MD_ADMIN_PASSWORD`, unchanged, or the default `changeme`), and `md-install.log` is 0600, for `install`,
+  `save` and `uninstall`, including a log an older run left at 0644.
+
+### Changed
+- **A re-run that changes nothing doesn't restart Caddy** (spec 21, Q5). Before, every run stopped the stack first.
+  Now a stack that already serves `TCP_PORT` stays up: `docker compose up -d` recreates it only if its image or compose
+  file changed, and a changed Caddyfile restarts it once. A stack on another port, or a run with `MD_RESET=true`, is
+  stopped as before, but only once the image and the hash are ready. The image is now built without a provenance
+  attestation, which carried the build time, so with Docker's containerd image store every rebuild had a new ID and
+  compose recreated Caddy on every run.
+- **The login is stored in `$BASE_DIR/.auth-hash`**, readable by root only: the user, Caddy's hash, and a fingerprint
+  of the hash with the password (as SeaweedFS's installer does). A password that matches the fingerprint keeps its
+  hash, so the Caddyfile stays the same. `uninstall` removes it with the rest of `$BASE_DIR`.
+- **An install by v1.6.1 or earlier keeps its bcrypt hash**, and its Caddyfile unchanged, while `MD_ADMIN_PASSWORD`
+  is unset. The first run that sets a password hashes it with argon2id, and Caddy restarts once.
+- **An unset `MD_ADMIN_USER` keeps the stored user,** as the password does. Before, it went back to `admin`.
+- **A password with a control character, such as a tab or a newline, or over 128 characters, is refused**, with a
+  message that names `MD_ADMIN_PASSWORD` and never shows the value. A user name and a password that are both wrong are
+  reported in the same run.
+- **A Caddy older than 2.11 hashes with bcrypt, as before.** It has no argon2id: an old bundle or registry image, or
+  an older `CADDY_VERSION`. A password over 72 bytes is then refused, before the running site is stopped, with a
+  message that says to use a newer Caddy.
+
+### Tests
+- `tests/password-vectors.txt` and `tests/vectors.bash`: spec 21's test passwords, the same in every changed repo.
+- `tests/unit/admin-login.bats`: the whole install with Docker stubbed. Each test password goes through each place the
+  password goes, compared byte for byte: what reaches `hash-password` on stdin (never an argument), the Caddyfile
+  (argon2id, the hash, never the password) and `.auth-hash` (the fingerprint, worked out again in Python, and mode
+  0600). Then a re-run with the same password, which keeps the hash and doesn't restart Caddy; a changed password;
+  unset and empty `MD_ADMIN_PASSWORD`; the first install's `changeme`; control characters and 129 characters; the
+  user-name rule; the stored user; an install by v1.6.1; an unreadable `.auth-hash`; a failed hash, which leaves the
+  site up; the order of the stop for another port and `MD_RESET`; a Caddy older than 2.11; the banner and the log's
+  mode.
+- `tests/secret-lint.py` and `tests/unit/secret-lint.bats`: spec 21's static check, which fails on an unquoted secret,
+  or a secret given to `echo`, `eval`, `sed` or `--set`. It found the banner's `echo` of the password.
+- `tests/integration/10-lifecycle.sh` installs with the long test password (128 characters) and logs in with it, then
+  re-runs without `MD_ADMIN_PASSWORD`: the password still logs in, `changeme` doesn't, and Caddy's start time is
+  unchanged. An empty and a 129-character password are then refused, with the site still up and unrestarted. It also
+  checks the banner, the log's mode and `.auth-hash`'s.
+
 ## v1.6.1 — 2026-11-09 — Air-gapped Docker on SUSE and on Rocky 10's image kernel
 
 ### Fixed

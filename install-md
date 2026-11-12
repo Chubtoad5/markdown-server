@@ -20,7 +20,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="1.6.1"
+SCRIPT_VERSION="1.7.0"
 # Helper scripts come from releases, not main (spec 14, as spec 12 did for rke2 and SeaweedFS). A URL wins over its ref,
 # IPP_URL still works as an alias for IMAGE_PULL_PUSH_URL, and a checksum is optional.
 IMAGE_PULL_PUSH_REF="${IMAGE_PULL_PUSH_REF:-v1.1.1}"
@@ -47,11 +47,14 @@ CADDY_VERSION="${CADDY_VERSION:-latest}"              # Caddy base image tag (la
 IMG_NAME="${IMG_NAME:-markdown-caddy}"                # Built (xcaddy+webdav) image repo name
 MAX_FOLDER_DEPTH="${MAX_FOLDER_DEPTH:-5}"             # Sidebar/API folder nesting depth (guardrail)
 AUTH_MODE="${AUTH_MODE:-basic}"                       # basic | none | forward — guards /admin + /dav writes
-MD_ADMIN_USER="${MD_ADMIN_USER:-admin}"               # basic-auth username
-MD_ADMIN_PASSWORD="${MD_ADMIN_PASSWORD:-changeme}"    # basic-auth password (CHANGE for production!)
+MD_ADMIN_USER="${MD_ADMIN_USER:-}"                    # basic-auth username (default: the last install's, else admin)
+ADMIN_PASSWORD_GIVEN="${MD_ADMIN_PASSWORD+x}"         # x when MD_ADMIN_PASSWORD is set at all, even to "" (refused)
+MD_ADMIN_PASSWORD="${MD_ADMIN_PASSWORD-}"             # basic-auth password (default: the last install's, else changeme)
 ENABLE_WEBDAV="${ENABLE_WEBDAV:-true}"                # enable WebDAV (/dav) + upload UI (/admin)
 FORWARD_AUTH_URL="${FORWARD_AUTH_URL:-}"              # AUTH_MODE=forward: IdP/Authentik outpost URL
-ADMIN_HASH=""                                         # bcrypt hash of MD_ADMIN_PASSWORD (computed at install)
+ADMIN_HASH=""                                         # Caddy's hash of the admin password: the stored one, or made at install
+ADMIN_FINGERPRINT=""                                  # ties ADMIN_HASH to its password, in .auth-hash (empty when unknown)
+ADMIN_PASSWORD_SOURCE=""                              # given | kept | default: what the closing banner says about it
 
 # Private registry (push to / pull-and-run from an OCI registry, e.g. Harbor).
 # Primary input is the `-registry <host:port> <user> <pass>` CLI triple; these
@@ -126,8 +129,10 @@ Environment variables (override at runtime, e.g. sudo TCP_PORT=8080 ./install-md
   CADDY_VERSION   Caddy image tag                  (default: latest)
   MAX_FOLDER_DEPTH  Folder nesting shown in sidebar/API  (default: 5)
   AUTH_MODE         basic | none | forward (guards writes) (default: basic)
-  MD_ADMIN_USER     basic-auth user                      (default: admin)
-  MD_ADMIN_PASSWORD basic-auth password                  (default: changeme)
+  MD_ADMIN_USER     basic-auth user: letters, digits and . _ @ + -
+                    (default: the last install's; admin on a first install)
+  MD_ADMIN_PASSWORD basic-auth password, up to 128 characters, no control characters
+                    (default: the last install's; changeme on a first install)
   ENABLE_WEBDAV     enable /dav + /admin upload UI        (default: true)
   FORWARD_AUTH_URL  IdP outpost URL (AUTH_MODE=forward)
   MD_RESET        true = wipe content on install (backup still taken)   (default: false)
@@ -329,7 +334,10 @@ build_image() {
     echo "  Building custom Caddy image $(md_image) (xcaddy + webdav, assets baked in)..."
     [[ -d "$BASE_DIR/assets" && -n "$(ls -A "$BASE_DIR/assets" 2>/dev/null)" ]] || fetch_assets
     generate_dockerfile
-    docker build -t "$(md_image)" -f "$BASE_DIR/Dockerfile" "$BASE_DIR"
+    # No provenance attestation: it carries the build time, so with Docker's containerd image store every rebuild got a
+    # new image ID, even from cache, and compose then recreated Caddy on every re-run (spec 21, Q5). The legacy
+    # builder ignores the setting.
+    BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker build -t "$(md_image)" -f "$BASE_DIR/Dockerfile" "$BASE_DIR"
 }
 
 fetch_assets() {
@@ -508,11 +516,142 @@ load_offline_image() {
     gunzip -c "$BASE_DIR/.offline/image/$(image_tar)" | docker load
 }
 
+# ---- Admin login (AUTH_MODE=basic) ----
+# The stored login is $BASE_DIR/.auth-hash, root only: the user, Caddy's hash of the password, and a fingerprint that
+# ties the hash to its password, as SeaweedFS's installer does. A re-run with the same password keeps the hash, so the
+# Caddyfile doesn't change and Caddy isn't restarted (spec 21, Q5). A re-run with no MD_ADMIN_PASSWORD keeps the
+# stored login (M3).
+auth_file() { echo "$BASE_DIR/.auth-hash"; }
+
+# auth_fingerprint <hash> <password>: the sha256 of "hash:password". The password reaches sha256sum on a pipe, never in
+# its arguments. It's a fast hash, which is why .auth-hash is 0600.
+auth_fingerprint() { printf '%s' "$1:$2" | sha256sum | awk '{print $1}'; }
+
+# is_admin_hash <hash>: a hash Caddy's basic_auth takes: bcrypt, or argon2id (Caddy 2.11 and later).
+is_admin_hash() { [[ "$1" == '$2'[aby]'$'?* || "$1" == '$argon2id$'?* ]]; }
+
+# read_stored_login: STORED_USER, STORED_HASH and STORED_FP from .auth-hash. An install by v1.6.1 or earlier kept no
+# .auth-hash, so its login comes from its Caddyfile's basic_auth block, with no fingerprint. STORED_FROM names the
+# file. Returns 1 when there's no stored login, and 2 when there's one that can't be read.
+read_stored_login() {
+    local f line block_re='^[[:space:]]*basic_auth( (bcrypt|argon2id))? [{]$'
+    STORED_USER="" STORED_HASH="" STORED_FP="" STORED_FROM=""
+    f=$(auth_file)
+    if [[ -f "$f" ]]; then
+        STORED_USER=$(sed -n 's/^user=//p' "$f")
+        STORED_HASH=$(sed -n 's/^hash=//p' "$f")
+        STORED_FP=$(sed -n 's/^fingerprint=//p' "$f")
+    elif [[ -f "$BASE_DIR/Caddyfile" ]] && grep -qE "$block_re" "$BASE_DIR/Caddyfile"; then
+        f="$BASE_DIR/Caddyfile"
+        line=$(awk -v re="$block_re" '$0 ~ re { getline; print; exit }' "$f")
+        read -r STORED_USER STORED_HASH _ <<< "$line"
+    else
+        return 1
+    fi
+    STORED_FROM=$f
+    if [[ -z "$STORED_USER" ]] || ! is_admin_hash "$STORED_HASH"; then
+        return 2
+    fi
+}
+
+# check_admin_login: the admin login's checks, all before anything is stopped or changed (spec 21, rule 7), each
+# naming its variable and never showing a value. Then which login this install writes: MD_ADMIN_PASSWORD when it's
+# set; the stored login when it isn't (M3); changeme on a first install. A password that matches the stored
+# fingerprint keeps the stored hash (Q5); any other is hashed later, by hash_admin_password, once the image is there.
+check_admin_login() {
+    [[ "$ENABLE_WEBDAV" == "true" && "$AUTH_MODE" == "basic" ]] || return 0
+    local stored=0 bad=0
+    # Spelled out rather than A-Z, which some locales stretch to other letters
+    local user_re='^[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._@+-]+$'
+    read_stored_login || stored=$?
+    [[ -n "$MD_ADMIN_USER" ]] || MD_ADMIN_USER=${STORED_USER:-admin}
+    if ! [[ "$MD_ADMIN_USER" =~ $user_re ]]; then
+        echo "Error: MD_ADMIN_USER can only have letters, digits and . _ @ + - (the Caddyfile takes the name as written)." >&2
+        bad=1
+    fi
+    if [[ -n "$ADMIN_PASSWORD_GIVEN" ]]; then
+        if [[ -z "$MD_ADMIN_PASSWORD" ]]; then
+            echo "Error: MD_ADMIN_PASSWORD is set but empty. Unset it to keep the current password, or set a new one." >&2
+            bad=1
+        elif [[ "$MD_ADMIN_PASSWORD" == *[[:cntrl:]]* ]]; then
+            echo "Error: MD_ADMIN_PASSWORD can't contain a control character, such as a tab or a newline." >&2
+            bad=1
+        elif (( ${#MD_ADMIN_PASSWORD} > 128 )); then
+            echo "Error: MD_ADMIN_PASSWORD can't be longer than 128 characters." >&2
+            bad=1
+        fi
+    elif [[ $stored -eq 2 ]]; then
+        echo "Error: the admin login the last install stored in $STORED_FROM can't be read. Set MD_ADMIN_PASSWORD to set it again." >&2
+        bad=1
+    fi
+    [[ $bad -eq 0 ]] || exit 1
+
+    if [[ -z "$ADMIN_PASSWORD_GIVEN" && $stored -eq 0 ]]; then
+        ADMIN_HASH=$STORED_HASH ADMIN_FINGERPRINT=$STORED_FP ADMIN_PASSWORD_SOURCE=kept
+        if [[ -n "$STORED_FP" && "$(auth_fingerprint "$STORED_HASH" changeme)" == "$STORED_FP" ]]; then
+            ADMIN_PASSWORD_SOURCE=default
+        fi
+        return 0
+    fi
+    [[ -n "$ADMIN_PASSWORD_GIVEN" ]] || MD_ADMIN_PASSWORD=changeme
+    ADMIN_PASSWORD_SOURCE=given
+    [[ "$MD_ADMIN_PASSWORD" != changeme ]] || ADMIN_PASSWORD_SOURCE=default
+    if [[ $stored -eq 0 && -n "$STORED_FP" && "$(auth_fingerprint "$STORED_HASH" "$MD_ADMIN_PASSWORD")" == "$STORED_FP" ]]; then
+        ADMIN_HASH=$STORED_HASH ADMIN_FINGERPRINT=$STORED_FP
+    fi
+}
+
+# hash_admin_password: ADMIN_HASH from the runtime image's Caddy, argon2id, with the password on stdin (spec 21, rules
+# 2 and 4), never on the command line, where ps shows it to every local account. Caddy reads one line and drops the
+# newline. A Caddy older than 2.11 (an old bundle or registry image, or an older CADDY_VERSION) has no argon2id, so it
+# hashes with bcrypt, as before, which takes up to 72 bytes.
+hash_admin_password() {
+    local img out help
+    img="$(runtime_image)"
+    out=$(printf '%s\n' "$MD_ADMIN_PASSWORD" | docker run --rm -i "$img" caddy hash-password --algorithm argon2id) || out=""
+    if [[ "$out" != '$argon2id$'?* ]]; then
+        help=$(docker run --rm "$img" caddy hash-password --help 2>&1 || true)
+        if [[ "$help" == *argon2id* ]]; then
+            echo "Error: the Caddy in $img couldn't hash the admin password." >&2
+            exit 1
+        fi
+        if (( $(printf '%s' "$MD_ADMIN_PASSWORD" | wc -c) > 72 )); then
+            echo "Error: MD_ADMIN_PASSWORD is over 72 bytes, which needs argon2id, and the Caddy in $img is older than 2.11 and has none." >&2
+            echo "  Use a newer Caddy (for example CADDY_VERSION=2.11.3), or a password of 72 bytes or fewer." >&2
+            exit 1
+        fi
+        echo "  NOTE: the Caddy in $img is older than 2.11 and has no argon2id, so the admin password is hashed with bcrypt."
+        out=$(printf '%s\n' "$MD_ADMIN_PASSWORD" | docker run --rm -i "$img" caddy hash-password) || out=""
+        if [[ "$out" != '$2'[aby]'$'?* ]]; then
+            echo "Error: the Caddy in $img couldn't hash the admin password." >&2
+            exit 1
+        fi
+    fi
+    ADMIN_HASH=$out
+    ADMIN_FINGERPRINT=$(auth_fingerprint "$ADMIN_HASH" "$MD_ADMIN_PASSWORD")
+}
+
+# save_admin_login: .auth-hash, root only (0600), written whole, then moved into place.
+save_admin_login() {
+    local f
+    f=$(auth_file)
+    rm -f "$f.new"
+    ( umask 077; printf 'user=%s\nhash=%s\nfingerprint=%s\n' "$MD_ADMIN_USER" "$ADMIN_HASH" "$ADMIN_FINGERPRINT" > "$f.new" )
+    chmod 600 "$f.new"
+    mv -f "$f.new" "$f"
+}
+
 auth_block() {
-    # Emits the auth directive for a write handle, per AUTH_MODE. Indented 8 spaces.
+    # Emits the auth directive for a write handle, per AUTH_MODE. Indented 8 spaces. The user name passed
+    # check_admin_login's rule, so it's one plain Caddyfile token. A bcrypt hash kept from an older install keeps
+    # today's line, so the Caddyfile doesn't change and Caddy isn't restarted for it.
     case "$AUTH_MODE" in
         basic)
-            echo "        basic_auth {"
+            if [[ "$ADMIN_HASH" == '$argon2id$'* ]]; then
+                echo "        basic_auth argon2id {"
+            else
+                echo "        basic_auth {"
+            fi
             echo "            $MD_ADMIN_USER $ADMIN_HASH"
             echo "        }"
             ;;
@@ -1581,19 +1720,37 @@ print_access() {
     echo "    $scheme://$FQDN:$TCP_PORT"
     if [[ "$ENABLE_WEBDAV" == "true" ]]; then
         echo "  Upload / manage UI:  $scheme://$MGMT_IP:$TCP_PORT/admin"
+        # The banner never shows a password (spec 21, M4): only changeme, the documented default, is named
         case "$AUTH_MODE" in
-            basic) echo "    auth: basic  (user: $MD_ADMIN_USER  pass: $MD_ADMIN_PASSWORD)  — change MD_ADMIN_PASSWORD!" ;;
+            basic)
+                case "$ADMIN_PASSWORD_SOURCE" in
+                    default) echo "    auth: basic  (user: $MD_ADMIN_USER, password: the default, changeme)  — set MD_ADMIN_PASSWORD to change it!" ;;
+                    kept)    echo "    auth: basic  (user: $MD_ADMIN_USER, password: unchanged, as the last install set it)" ;;
+                    *)       echo "    auth: basic  (user: $MD_ADMIN_USER, password: the one in MD_ADMIN_PASSWORD)" ;;
+                esac ;;
             none)  echo "    auth: NONE — /admin and /dav are unauthenticated (risky)" ;;
             forward) echo "    auth: forward_auth -> $FORWARD_AUTH_URL" ;;
         esac
     fi
 }
 
-do_install() {
-    : > "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/md-install.log"
+# start_log: md-install.log in the current directory, or /tmp when that can't be written, readable by root only (spec
+# 21, M4). Everything the run prints goes there too.
+start_log() {
+    if ! ( umask 077; : > "$LOG_FILE" ) 2>/dev/null; then
+        LOG_FILE="/tmp/md-install.log"
+        ( umask 077; : > "$LOG_FILE" ) 2>/dev/null || true
+    fi
+    chmod 600 "$LOG_FILE" 2>/dev/null || true
     exec > >(tee -a "$LOG_FILE") 2>&1
+}
+
+do_install() {
+    start_log
 
     echo "### - Starting Markdown Server installation - $(date) ###"
+    # Every refusal of the admin login comes first, before anything is stopped or changed (spec 21, rule 7)
+    check_admin_login
     detect_distro
     mkdir -p "$BASE_DIR"
 
@@ -1608,18 +1765,22 @@ do_install() {
         ensure_docker
     fi
 
-    # Stop any existing stack first so the port frees up before we probe it.
     # A registry run needs image_pull_push.sh: get it, or fail, while the running site is still up
     if [[ $REGISTRY_MODE -eq 1 || $PUSH_MODE -eq 1 ]]; then
         ensure_ipp
     fi
 
-    if [[ -f "$BASE_DIR/docker-compose.yml" ]]; then
-        echo "  Stopping existing Markdown Server stack..."
-        docker compose -f "$BASE_DIR/docker-compose.yml" down >/dev/null 2>&1 || true
+    # The running site stays up while the new image is built and the password hashed, so a failure there leaves it
+    # up (spec 21, M1). When it already serves this port, it isn't stopped at all: compose up -d below recreates it
+    # only if its image or compose file changed, and a changed Caddyfile restarts it, so a re-run that changes nothing
+    # doesn't restart Caddy (Q5). Otherwise, as before, it's stopped, but only once the image and the hash are ready.
+    local serving_port=false keep_running=false
+    if [[ -f "$BASE_DIR/docker-compose.yml" ]] \
+        && [[ -n "$(docker compose -f "$BASE_DIR/docker-compose.yml" port caddy "$TCP_PORT" 2>/dev/null)" ]]; then
+        serving_port=true
+        [[ "${MD_RESET:-false}" == "true" ]] || keep_running=true
     fi
-
-    if port_in_use "$TCP_PORT"; then
+    if [[ "$serving_port" == false ]] && port_in_use "$TCP_PORT"; then
         echo "Error: TCP port $TCP_PORT is already in use. Set TCP_PORT=<free port> or free the port." >&2
         exit 1
     fi
@@ -1646,10 +1807,21 @@ do_install() {
         push_image
     fi
 
-    # Hash the admin password using the runtime image's caddy binary (basic auth only).
+    # The admin login (basic auth only): the stored hash while the password is the same, else a new one from the
+    # runtime image's Caddy.
     if [[ "$ENABLE_WEBDAV" == "true" && "$AUTH_MODE" == "basic" ]]; then
-        echo "  Hashing admin password..."
-        ADMIN_HASH="$(docker run --rm "$(runtime_image)" caddy hash-password --plaintext "$MD_ADMIN_PASSWORD")"
+        if [[ -n "$ADMIN_HASH" ]]; then
+            echo "  Keeping the stored admin password hash."
+        else
+            echo "  Hashing the admin password..."
+            hash_admin_password
+        fi
+        save_admin_login
+    fi
+
+    if [[ -f "$BASE_DIR/docker-compose.yml" && "$keep_running" == false ]]; then
+        echo "  Stopping existing Markdown Server stack..."
+        docker compose -f "$BASE_DIR/docker-compose.yml" down >/dev/null 2>&1 || true
     fi
 
     # Preserve existing user content (never silently destroy markdown files).
@@ -1668,6 +1840,8 @@ do_install() {
     fi
 
     mkdir -p "$SRV_DIR"
+    local old_caddyfile=""
+    [[ ! -f "$BASE_DIR/Caddyfile" ]] || old_caddyfile=$(sha256sum < "$BASE_DIR/Caddyfile")
     echo "  Generating Caddyfile..."
     generate_caddyfile
     echo "  Generating layout.html..."
@@ -1688,16 +1862,21 @@ do_install() {
     fi
     write_install_env
 
-    echo "  Starting docker compose..."
-    ( cd "$BASE_DIR" && docker compose up -d )
+    # Caddy reads its Caddyfile only when it starts, and compose doesn't look inside it
+    if [[ "$keep_running" == true && "$(sha256sum < "$BASE_DIR/Caddyfile")" != "$old_caddyfile" ]]; then
+        echo "  The Caddyfile changed: restarting Markdown Server..."
+        ( cd "$BASE_DIR" && docker compose up -d --force-recreate )
+    else
+        echo "  Starting docker compose..."
+        ( cd "$BASE_DIR" && docker compose up -d )
+    fi
 
     echo "### - Markdown Server installation finished - $(date) ###"
     print_access
 }
 
 do_uninstall() {
-    : > "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/md-install.log"
-    exec > >(tee -a "$LOG_FILE") 2>&1
+    start_log
 
     # Recover install-time paths (SRV_DIR etc.) so teardown matches the install.
     # shellcheck disable=SC1091
@@ -1722,8 +1901,7 @@ do_uninstall() {
 }
 
 do_save() {
-    : > "$LOG_FILE" 2>/dev/null || LOG_FILE="/tmp/md-install.log"
-    exec > >(tee -a "$LOG_FILE") 2>&1
+    start_log
 
     echo "### - Building Markdown Server offline bundle - $(date) ###"
     detect_distro
